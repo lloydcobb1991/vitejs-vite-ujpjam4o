@@ -148,7 +148,7 @@ export default function Emberwatch() {
       .map((b) => `- ${b.name} (${b.supplier})`)
       .join('\n');
 
-    const response = await fetch('https://ignitecs.co/emberwatch-proxy.php', {
+    const response = await fetch('/api/analyze', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
