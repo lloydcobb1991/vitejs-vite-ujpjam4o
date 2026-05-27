@@ -148,7 +148,7 @@ export default function Emberwatch() {
       .map((b) => `- ${b.name} (${b.supplier})`)
       .join('\n');
 
-    const response = await fetch('/api/analyze', {
+    const response = await fetch('https://emberwatch-api-production.up.railway.app/api/analyze', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
