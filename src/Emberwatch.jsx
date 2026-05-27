@@ -176,21 +176,13 @@ export default function Emberwatch() {
 ${brandList}
 
 **TASK:**
-1. Find every cocktail
-2. Identify APL brands in each recipe
-3. Count impressions (each mention = 1)
-4. Flag compliance issues (incomplete names like "Jack" instead of "Jack Daniel's Tennessee Whiskey")
+1. Find every cocktail and identify which APL brands appear in it
+2. Count impressions (each mention of a brand = 1 impression)
+3. Flag compliance issues (incomplete names like "Jack" instead of "Jack Daniel's Tennessee Whiskey", misspellings, or wrong product variants)
 
-**RETURN JSON:**
+**RETURN ONLY THIS JSON STRUCTURE - no other fields, no recipe text, no cocktail list:**
 \`\`\`json
 {
-  "cocktails": [
-    {
-      "name": "Cocktail Name",
-      "brands_used": ["Full Brand Name"],
-      "recipe_text": "ingredients"
-    }
-  ],
   "brand_impressions": {
     "Brand Name": {
       "count": 3,
@@ -203,13 +195,13 @@ ${brandList}
       "type": "incomplete_name",
       "found_text": "Jack",
       "correct_name": "Jack Daniel's Tennessee Whiskey",
-      "cocktail": "Name"
+      "cocktail": "Cocktail Name"
     }
   ]
 }
 \`\`\`
 
-ONLY respond with JSON.`,
+ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anywhere.`,
               },
             ],
           },
