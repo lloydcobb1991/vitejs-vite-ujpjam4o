@@ -1082,7 +1082,8 @@ function EmailReportView({ results, onBack }) {
     });
   };
 
-  const sendAll = async () => {
+  // Shared send pipeline. `batch` is the array of emails to send.
+  const doSend = async (batch) => {
     setSendError(null);
     setStep('sending');
 
@@ -1091,7 +1092,7 @@ function EmailReportView({ results, onBack }) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          emails: emails.map((e) => ({
+          emails: batch.map((e) => ({
             to: e.to,
             subject: e.subject,
             body: e.body,
@@ -1108,7 +1109,7 @@ function EmailReportView({ results, onBack }) {
       setSendSummary(data);
       if (data.failed > 0) {
         setSendError(
-          `${data.failed} of ${emails.length} emails failed. See details below.`
+          `${data.failed} of ${batch.length} emails failed. See details below.`
         );
       }
       setStep('done');
@@ -1118,6 +1119,12 @@ function EmailReportView({ results, onBack }) {
       setStep('review');
     }
   };
+
+  // Send every supplier report.
+  const sendAll = () => doSend(emails);
+
+  // Send ONLY the supplier currently being viewed — used for safe testing.
+  const sendOne = () => doSend([emails[currentIdx]]);
 
   // ----- Sending screen -----
   if (step === 'sending') {
@@ -1326,6 +1333,28 @@ function EmailReportView({ results, onBack }) {
             }}
           >
             Back
+          </button>
+          <button
+            onClick={sendOne}
+            title="Sends only the supplier you're currently viewing — useful for testing to your own inbox"
+            style={{
+              background: 'white',
+              color: '#1a1a1a',
+              border: '2px solid #1a1a1a',
+              padding: '14px 28px',
+              borderRadius: '10px',
+              fontSize: '15px',
+              fontWeight: '800',
+              cursor: 'pointer',
+              textTransform: 'uppercase',
+              letterSpacing: '1px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+            }}
+          >
+            <Send size={16} />
+            Send Test (This One)
           </button>
           <button
             onClick={sendAll}
