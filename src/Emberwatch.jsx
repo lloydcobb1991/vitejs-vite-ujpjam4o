@@ -558,9 +558,7 @@ function UploadView({
           disabled={analyzing || uploadedFiles.length === 0}
           style={{
             width: '100%',
-            background: analyzing
-              ? 'linear-gradient(135deg, #999 0%, #666 100%)'
-              : 'linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%)',
+          background: analyzing ? '#999' : '#da291c',
             color: 'white',
             border: 'none',
             padding: '28px',
@@ -577,7 +575,7 @@ function UploadView({
             alignItems: 'center',
             justifyContent: 'center',
             gap: '12px',
-            boxShadow: '0 8px 24px rgba(0,0,0,0.3)',
+            boxShadow: '0 4px 12px rgba(218, 41, 28, 0.25)',
           }}
         >
           {analyzing ? (

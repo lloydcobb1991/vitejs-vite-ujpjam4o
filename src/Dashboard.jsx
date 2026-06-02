@@ -15,7 +15,7 @@ export default function Dashboard({ onSelectTool }) {
     {
       id: 'refinery',
       name: 'The Refinery',
-      description: 'Transform Cereus reports to client-ready format',
+      description: 'Transform reports to client-ready format',
     },
     {
       id: 'beacon',
