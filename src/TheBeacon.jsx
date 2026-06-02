@@ -267,7 +267,6 @@ export default function TheBeacon() {
   return (
     <div
       style={{
-        minHeight: '100vh',
         background: '#f5f5f5',
         fontFamily: '"Brandon Grotesque", "Helvetica Neue", Arial, sans-serif',
       }}
@@ -276,54 +275,7 @@ export default function TheBeacon() {
         @import url('https://use.typekit.net/gfb2mjm.css');
       `}</style>
 
-      {/* Header */}
-      <div
-        style={{
-          background: 'white',
-          borderBottom: '2px solid #e8e8e8',
-          padding: '20px 40px',
-        }}
-      >
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '12px',
-            justifyContent: 'center',
-          }}
-        >
-          <div
-            style={{
-              width: '40px',
-              height: '40px',
-              borderRadius: '8px',
-              background: '#da291c',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-            }}
-          >
-            <Zap size={24} color="white" fill="white" />
-          </div>
-          <div>
-            <h1
-              style={{
-                margin: 0,
-                fontSize: '24px',
-                fontWeight: '700',
-                color: '#1a1a1a',
-              }}
-            >
-              The Beacon
-            </h1>
-            <p style={{ margin: 0, fontSize: '13px', color: '#666' }}>
-              Prospect Hunter by Ignite Creative Services
-            </p>
-          </div>
-        </div>
-      </div>
-
-      <div style={{ display: 'flex', height: 'calc(100vh - 82px)' }}>
+      <div style={{ display: 'flex', height: 'calc(100vh - 200px)' }}>
         {/* Sidebar */}
         <div
           style={{
