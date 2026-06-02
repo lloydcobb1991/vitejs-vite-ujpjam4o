@@ -112,8 +112,26 @@ export default function AppShell() {
             overflow: 'auto',
             display: 'flex',
             flexDirection: 'column',
+            position: 'relative',
           }}
         >
+          {/* Persistent brand mark — top right corner of the content area */}
+          <img
+            src="/ignitecs-mark.png"
+            alt="Ignite CS"
+            style={{
+              position: 'absolute',
+              top: '20px',
+              right: '24px',
+              width: '36px',
+              height: '36px',
+              objectFit: 'contain',
+              zIndex: 2,
+              opacity: 0.9,
+              pointerEvents: 'none',
+            }}
+          />
+
           <div
             key={activeId || 'welcome'}
             style={{
@@ -197,16 +215,15 @@ function LogoBlock({ activeTool }) {
       onMouseLeave={() => setIsHovered(false)}
       style={{
         background: COLOR.red,
-        height: '168px',
+        height: '160px',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
         position: 'relative',
         overflow: 'hidden',
-        // 4px white frame around the block, plus the inset shadow for depth
-        border: '4px solid white',
-        boxSizing: 'border-box',
-        boxShadow: 'inset 0 -1px 0 rgba(0,0,0,0.25), inset 0 1px 0 rgba(255,255,255,0.06)',
+        // Soft outer shadow + thin dark hairline. Reads as a framed badge
+        // without bleeding into the white tool header next to it.
+        boxShadow: '0 0 0 1px rgba(0,0,0,0.1), 0 4px 12px rgba(0,0,0,0.08), inset 0 -1px 0 rgba(0,0,0,0.2)',
       }}
     >
       {activeTool ? (
@@ -430,7 +447,7 @@ function SidebarFooter() {
           fontWeight: '600',
         }}
       >
-        Build (Beta) v0.8
+        Build (Beta) v0.2
       </div>
     </div>
   );
@@ -665,14 +682,20 @@ function BottomBar() {
 
       <div
         style={{
-          fontSize: '13px',
-          fontWeight: '800',
-          color: COLOR.charcoal,
-          letterSpacing: '0.5px',
+          display: 'flex',
+          alignItems: 'center',
         }}
       >
-        IGNITE<span style={{ color: COLOR.red }}>CS</span>
-        <sup style={{ fontSize: '8px', marginLeft: '2px', color: COLOR.textMuted }}>™</sup>
+        <img
+          src="/ignitecs-lockup.png"
+          alt="IgniteCS"
+          style={{
+            height: '24px',
+            width: 'auto',
+            objectFit: 'contain',
+            display: 'block',
+          }}
+        />
       </div>
     </footer>
   );
