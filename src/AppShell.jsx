@@ -184,6 +184,10 @@ function LogoBlock({ activeTool }) {
         justifyContent: 'center',
         position: 'relative',
         overflow: 'hidden',
+        // Inset shadow gives the block visual definition against the
+        // sidebar without adding a hard border line.
+        boxShadow: 'inset 0 -1px 0 rgba(0,0,0,0.25), inset 0 1px 0 rgba(255,255,255,0.06)',
+        borderBottom: '1px solid rgba(0,0,0,0.15)',
       }}
     >
       {activeTool ? (
@@ -365,33 +369,35 @@ function ToolHeader({ tool }) {
   return (
     <div
       style={{
-        padding: '28px 40px 24px',
+        height: '160px',
+        padding: '0 48px',
         borderBottom: '1px solid #ececec',
         background: COLOR.contentBg,
         display: 'flex',
-        alignItems: 'baseline',
+        alignItems: 'center',
         justifyContent: 'space-between',
         gap: '24px',
         flexWrap: 'wrap',
+        flexShrink: 0,
       }}
     >
       <div>
         <h1
           style={{
             margin: 0,
-            fontSize: '28px',
+            fontSize: '36px',
             fontWeight: '800',
             color: COLOR.charcoal,
-            letterSpacing: '-0.5px',
-            lineHeight: 1.2,
+            letterSpacing: '-0.8px',
+            lineHeight: 1.1,
           }}
         >
           {tool.name}
         </h1>
         <p
           style={{
-            margin: '6px 0 0 0',
-            fontSize: '14px',
+            margin: '10px 0 0 0',
+            fontSize: '15px',
             color: COLOR.textDim,
             fontWeight: '500',
           }}
