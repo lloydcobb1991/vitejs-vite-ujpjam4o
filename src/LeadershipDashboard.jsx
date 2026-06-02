@@ -1,12 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import { CheckCircle2, Circle, MessageSquare, ThumbsUp, ThumbsDown, Clock, Calendar, User, AlertCircle, CheckCircle, X, ChevronRight } from 'lucide-react';
+import { Plus, CheckCircle2, Circle, Trash2, MessageSquare, Edit2, Save, X, Zap, Clock, AlertCircle, CheckCircle } from 'lucide-react';
 
-export default function LeadershipDashboard() {
+export default function IntegrationTracker() {
   const [projects, setProjects] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [filter, setFilter] = useState('active'); // active or pending
+  const [isAddingProject, setIsAddingProject] = useState(false);
+  const [filter, setFilter] = useState('active');
   const [selectedProject, setSelectedProject] = useState(null);
-  const [expandedProject, setExpandedProject] = useState(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     loadProjects();
@@ -34,45 +34,53 @@ export default function LeadershipDashboard() {
     }
   };
 
-  const updateProjectStatus = (projectId, status, comment = '') => {
+  const addProject = (projectData) => {
+    const newProject = {
+      id: Date.now(),
+      ...projectData,
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+      comments: [],
+      tasks: projectData.tasks.map((task, idx) => ({
+        id: `task-${Date.now()}-${idx}`,
+        text: task,
+        completed: false
+      }))
+    };
+    saveProjects([...projects, newProject]);
+    setIsAddingProject(false);
+  };
+
+  const toggleTask = (projectId, taskId) => {
     const updated = projects.map(p => {
       if (p.id === projectId) {
-        const newComments = comment ? [...p.comments, { 
-          text: comment, 
-          date: new Date().toISOString(),
-          type: status,
-          author: 'Leadership'
-        }] : p.comments;
-        return { ...p, status, comments: newComments, reviewedAt: new Date().toISOString() };
+        const updatedTasks = p.tasks.map(t => 
+          t.id === taskId ? { ...t, completed: !t.completed } : t
+        );
+        return { ...p, tasks: updatedTasks };
       }
       return p;
     });
     saveProjects(updated);
   };
 
-  const addComment = (projectId, comment) => {
-    const updated = projects.map(p => {
-      if (p.id === projectId) {
-        return {
-          ...p,
-          comments: [...p.comments, { 
-            text: comment, 
-            date: new Date().toISOString(),
-            type: 'comment',
-            author: 'Leadership'
-          }]
-        };
+  const deleteProject = (projectId) => {
+    if (confirm('Are you sure you want to delete this project?')) {
+      saveProjects(projects.filter(p => p.id !== projectId));
+      if (selectedProject?.id === projectId) {
+        setSelectedProject(null);
       }
-      return p;
-    });
-    saveProjects(updated);
+    }
   };
 
-  const updateProjectThumbnail = (projectId, imageDataUrl) => {
+  const editProject = (projectId, updates) => {
     const updated = projects.map(p => 
-      p.id === projectId ? { ...p, thumbnail: imageDataUrl } : p
+      p.id === projectId ? { ...p, ...updates } : p
     );
     saveProjects(updated);
+    if (selectedProject?.id === projectId) {
+      setSelectedProject({ ...selectedProject, ...updates });
+    }
   };
 
   const calculateProgress = (tasks) => {
@@ -95,439 +103,313 @@ export default function LeadershipDashboard() {
         display: 'flex', 
         justifyContent: 'center', 
         alignItems: 'center', 
-        height: '100vh',
+        padding: '80px 20px',
         fontFamily: '"Brandon Grotesque", "Helvetica Neue", Arial, sans-serif',
-        background: '#da291c',
-        color: 'white'
+        background: '#f5f5f5',
+        color: '#1a1a1a'
       }}>
-        Loading The Forge...
+        Loading projects...
       </div>
     );
   }
 
   return (
     <div style={{
-      minHeight: '100vh',
-      background: '#da291c',
-      fontFamily: '"Brandon Grotesque", "Helvetica Neue", Arial, sans-serif',
-      display: 'flex'
+      background: '#f5f5f5',
+      padding: '30px 20px',
+      fontFamily: '"Brandon Grotesque", "Helvetica Neue", Arial, sans-serif'
     }}>
-      {/* Main Content */}
       <div style={{
-        flex: 1,
-        padding: '40px',
-        display: 'flex',
-        flexDirection: 'column'
+        maxWidth: '1800px',
+        minWidth: '320px',
+        width: '100%',
+        margin: '0 auto'
       }}>
-        {/* Header */}
-        <div style={{ marginBottom: '40px', textAlign: 'center' }}>
-          {/* Title */}
-          <div style={{ marginBottom: '30px' }}>
-            <h1 style={{
-              margin: '0 0 8px 0',
-              fontSize: '48px',
-              fontWeight: '900',
-              color: 'white',
-              letterSpacing: '-1px'
-            }}>
-              The Forge
-            </h1>
-            <p style={{
-              margin: 0,
-              fontSize: '14px',
-              color: 'rgba(255,255,255,0.8)',
-              textTransform: 'uppercase',
-              letterSpacing: '2px',
-              fontWeight: '600'
-            }}>
-              Ignite CS
-            </p>
-          </div>
-
-          {/* Logo (if available) */}
-          {false && (
-            <img 
-              src="/forge-logo.png" 
-              alt="The Forge" 
-              style={{ 
-                width: '150px', 
-                height: '150px', 
-                objectFit: 'contain',
-                marginBottom: '20px'
-              }} 
-            />
-          )}
-
-          {/* Search & Filter */}
-          <div style={{ display: 'flex', gap: '15px', alignItems: 'center', justifyContent: 'center', maxWidth: '800px', margin: '0 auto' }}>
-            <div style={{
-              flex: 1,
-              background: 'white',
-              borderRadius: '30px',
-              padding: '12px 25px',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '10px'
-            }}>
-              <span style={{ fontSize: '18px' }}>🔍</span>
-              <input 
-                type="text"
-                placeholder="Search Projects"
-                style={{
-                  border: 'none',
-                  outline: 'none',
-                  flex: 1,
-                  fontSize: '16px',
-                  fontFamily: 'inherit',
-                  fontStyle: 'italic'
-                }}
-              />
-            </div>
-            <div style={{
-              display: 'flex',
-              gap: '5px',
-              background: 'rgba(0,0,0,0.2)',
-              borderRadius: '30px',
-              padding: '5px'
-            }}>
-              <button
-                onClick={() => setFilter('active')}
-                style={{
-                  padding: '10px 30px',
-                  borderRadius: '25px',
-                  border: 'none',
-                  background: filter === 'active' ? 'white' : 'transparent',
-                  color: filter === 'active' ? '#da291c' : 'white',
-                  fontSize: '14px',
-                  fontWeight: '700',
-                  cursor: 'pointer',
-                  transition: 'all 0.2s ease'
-                }}
-              >
-                Active
-              </button>
-              <button
-                onClick={() => setFilter('pending')}
-                style={{
-                  padding: '10px 30px',
-                  borderRadius: '25px',
-                  border: 'none',
-                  background: filter === 'pending' ? 'white' : 'transparent',
-                  color: filter === 'pending' ? '#da291c' : 'white',
-                  fontSize: '14px',
-                  fontWeight: '700',
-                  cursor: 'pointer',
-                  transition: 'all 0.2s ease'
-                }}
-              >
-                Pending
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {/* Project Grid */}
+        {/* Toolbar: New Project + filter */}
         <div style={{
-          flex: 1,
           background: 'white',
-          borderRadius: '20px',
-          padding: '30px',
-          overflowY: 'auto'
-        }}>
-          {filteredProjects.length === 0 ? (
-            <div style={{ textAlign: 'center', padding: '60px', color: '#999' }}>
-              <p style={{ fontSize: '18px', margin: 0 }}>No {filter} projects</p>
-            </div>
-          ) : (
-            <div style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
-              gap: '24px'
-            }}>
-              {filteredProjects.map(project => (
-                <ProjectCard
-                  key={project.id}
-                  project={project}
-                  isSelected={selectedProject?.id === project.id}
-                  onClick={() => {
-                    if (project.status === 'pending') {
-                      setExpandedProject(project);
-                    } else {
-                      setSelectedProject(project);
-                    }
-                  }}
-                  calculateProgress={calculateProgress}
-                />
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Right Panel - At a Glance */}
-      {selectedProject && (
-        <div style={{
-          width: '400px',
-          background: '#2a2a2a',
-          color: 'white',
-          padding: '40px 30px',
+          borderRadius: '8px',
+          padding: '20px 30px',
+          marginBottom: '24px',
+          boxShadow: '0 2px 8px rgba(0, 0, 0, 0.06)',
           display: 'flex',
-          flexDirection: 'column',
-          position: 'relative',
-          animation: 'slideIn 0.3s ease-out',
-          boxShadow: '-10px 0 30px rgba(0,0,0,0.3)'
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          gap: '20px'
         }}>
-          <style>{`
-            @keyframes slideIn {
-              from {
-                transform: translateX(100%);
-                opacity: 0;
-              }
-              to {
-                transform: translateX(0);
-                opacity: 1;
-              }
-            }
-          `}</style>
-          <button
-            onClick={() => setSelectedProject(null)}
-            style={{
-              position: 'absolute',
-              top: '15px',
-              right: '15px',
-              background: 'none',
-              border: 'none',
-              color: 'white',
-              cursor: 'pointer',
-              padding: '5px'
-            }}
-          >
-            <X size={24} />
-          </button>
-
-          <h3 style={{
-            margin: '0 0 10px 0',
-            fontSize: '14px',
-            fontWeight: '600',
-            color: '#999',
-            textTransform: 'uppercase',
-            letterSpacing: '2px'
+          {/* Filter Toggle */}
+          <div style={{
+            display: 'flex',
+            gap: '5px',
+            background: '#f0f0f0',
+            borderRadius: '30px',
+            padding: '5px',
+            width: 'fit-content'
           }}>
-            At a Glance
-          </h3>
-
-          <h2 style={{
-            margin: '0 0 30px 0',
-            fontSize: '28px',
-            fontWeight: '700',
-            color: 'white'
-          }}>
-            Project #{selectedProject.id}
-          </h2>
-
-          {/* Thumbnail Display (no upload) */}
-          {selectedProject.thumbnail && (
-            <div style={{
-              width: '100%',
-              height: '200px',
-              background: `url(${selectedProject.thumbnail})`,
-              backgroundSize: 'cover',
-              backgroundPosition: 'center',
-              borderRadius: '10px',
-              marginBottom: '30px'
-            }} />
-          )}
-
-          {/* Quick Stats */}
-          <div style={{ marginBottom: '30px' }}>
-            <div style={{ marginBottom: '20px' }}>
-              <div style={{ fontSize: '12px', color: '#999', marginBottom: '5px', textTransform: 'uppercase', letterSpacing: '1px' }}>Start Date</div>
-              <div style={{ fontSize: '16px', fontWeight: '600' }}>
-                {new Date(selectedProject.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
-              </div>
-            </div>
-
-            <div style={{ marginBottom: '20px' }}>
-              <div style={{ fontSize: '12px', color: '#999', marginBottom: '5px', textTransform: 'uppercase', letterSpacing: '1px' }}>Completion</div>
-              <div style={{
-                background: '#1a1a1a',
-                height: '30px',
-                borderRadius: '15px',
-                overflow: 'hidden',
-                position: 'relative'
-              }}>
-                <div style={{
-                  background: 'linear-gradient(90deg, #da291c, #ff4444)',
-                  height: '100%',
-                  width: `${calculateProgress(selectedProject.tasks)}%`,
-                  transition: 'width 0.3s ease'
-                }} />
-                <span style={{
-                  position: 'absolute',
-                  top: '50%',
-                  left: '50%',
-                  transform: 'translate(-50%, -50%)',
-                  fontSize: '14px',
-                  fontWeight: '700',
-                  color: 'white'
-                }}>
-                  {calculateProgress(selectedProject.tasks)}%
-                </span>
-              </div>
-            </div>
-
-            <div>
-              <div style={{ fontSize: '12px', color: '#999', marginBottom: '5px', textTransform: 'uppercase', letterSpacing: '1px' }}>Status</div>
-              <div style={{
-                display: 'inline-block',
-                padding: '6px 16px',
-                borderRadius: '20px',
-                background: selectedProject.status === 'approved' ? '#28a745' : 
-                            selectedProject.status === 'denied' ? '#da291c' : '#ffa500',
-                fontSize: '13px',
+            <button
+              onClick={() => setFilter('active')}
+              style={{
+                padding: '10px 30px',
+                borderRadius: '25px',
+                border: 'none',
+                background: filter === 'active' ? '#da291c' : 'transparent',
+                color: filter === 'active' ? 'white' : '#666',
+                fontSize: '14px',
                 fontWeight: '700',
-                textTransform: 'uppercase',
-                letterSpacing: '1px'
-              }}>
-                {selectedProject.status}
-              </div>
-            </div>
+                cursor: 'pointer',
+                transition: 'all 0.2s ease'
+              }}
+            >
+              Active
+            </button>
+            <button
+              onClick={() => setFilter('pending')}
+              style={{
+                padding: '10px 30px',
+                borderRadius: '25px',
+                border: 'none',
+                background: filter === 'pending' ? '#da291c' : 'transparent',
+                color: filter === 'pending' ? 'white' : '#666',
+                fontSize: '14px',
+                fontWeight: '700',
+                cursor: 'pointer',
+                transition: 'all 0.2s ease'
+              }}
+            >
+              Pending
+            </button>
           </div>
 
           <button
-            onClick={() => setExpandedProject(selectedProject)}
+            onClick={() => setIsAddingProject(true)}
             style={{
-              width: '100%',
-              padding: '18px',
-              borderRadius: '10px',
+              padding: '14px 28px',
+              borderRadius: '4px',
               border: 'none',
               background: '#da291c',
               color: 'white',
-              fontSize: '16px',
+              fontSize: '14px',
               fontWeight: '700',
               cursor: 'pointer',
               textTransform: 'uppercase',
               letterSpacing: '1px',
-              marginTop: 'auto'
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px'
             }}
           >
-            More
+            <Plus size={18} />
+            New Project
           </button>
         </div>
-      )}
 
-      {/* Expanded Project Modal */}
-      {expandedProject && (
-        <ExpandedProjectModal
-          project={expandedProject}
-          onClose={() => setExpandedProject(null)}
-          onApprove={(comment) => {
-            updateProjectStatus(expandedProject.id, 'approved', comment);
-            setExpandedProject(null);
-          }}
-          onDeny={(comment) => {
-            updateProjectStatus(expandedProject.id, 'denied', comment);
-            setExpandedProject(null);
-          }}
-          onComment={(comment) => addComment(expandedProject.id, comment)}
-          calculateProgress={calculateProgress}
-        />
-      )}
+        {/* Project Grid */}
+        {filteredProjects.length === 0 ? (
+          <div style={{
+            background: 'white',
+            borderRadius: '8px',
+            padding: '60px 40px',
+            textAlign: 'center',
+            color: '#999',
+            boxShadow: '0 2px 8px rgba(0, 0, 0, 0.08)'
+          }}>
+            <p style={{ fontSize: '16px', margin: 0 }}>
+              No {filter} projects yet.
+            </p>
+          </div>
+        ) : (
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))',
+            gap: '20px'
+          }}>
+            {filteredProjects.map(project => (
+              <ProjectCard
+                key={project.id}
+                project={project}
+                onClick={() => setSelectedProject(project)}
+                calculateProgress={calculateProgress}
+              />
+            ))}
+          </div>
+        )}
+
+        {/* New Project Form Modal */}
+        {isAddingProject && (
+          <ProjectFormModal 
+            onSubmit={addProject} 
+            onCancel={() => setIsAddingProject(false)} 
+          />
+        )}
+
+        {/* Selected Project Detail Modal */}
+        {selectedProject && (
+          <ProjectDetailModal
+            project={selectedProject}
+            onClose={() => setSelectedProject(null)}
+            onToggleTask={toggleTask}
+            onDelete={deleteProject}
+            onEdit={editProject}
+            calculateProgress={calculateProgress}
+          />
+        )}
+      </div>
     </div>
   );
 }
 
-function ProjectCard({ project, isSelected, onClick, calculateProgress }) {
+function ProjectCard({ project, onClick, calculateProgress }) {
   const progress = calculateProgress(project.tasks);
   
+  const statusConfig = {
+    pending: { bg: '#fff8e6', border: '#ffa500', text: '#ffa500', label: 'Pending' },
+    approved: { bg: '#f0f9f4', border: '#28a745', text: '#28a745', label: 'Approved' },
+    denied: { bg: '#fff5f5', border: '#da291c', text: '#da291c', label: 'Declined' }
+  };
+
+  const status = statusConfig[project.status] || statusConfig.pending;
+
   return (
     <div
       onClick={onClick}
       style={{
-        background: isSelected ? '#f0f0f0' : '#fafafa',
-        borderRadius: '15px',
-        padding: '15px',
+        background: 'white',
+        borderRadius: '12px',
+        padding: '20px',
         cursor: 'pointer',
-        border: isSelected ? '3px solid #da291c' : '3px solid transparent',
+        border: '2px solid #e8e8e8',
         transition: 'all 0.2s ease',
-        aspectRatio: '1',
         display: 'flex',
         flexDirection: 'column',
-        position: 'relative',
-        overflow: 'hidden'
+        gap: '12px'
       }}
       onMouseOver={(e) => {
-        if (!isSelected) e.currentTarget.style.transform = 'translateY(-5px)';
-        if (!isSelected) e.currentTarget.style.boxShadow = '0 8px 20px rgba(0,0,0,0.1)';
+        e.currentTarget.style.transform = 'translateY(-5px)';
+        e.currentTarget.style.boxShadow = '0 8px 20px rgba(0,0,0,0.1)';
+        e.currentTarget.style.borderColor = '#da291c';
       }}
       onMouseOut={(e) => {
-        if (!isSelected) e.currentTarget.style.transform = 'translateY(0)';
-        if (!isSelected) e.currentTarget.style.boxShadow = 'none';
+        e.currentTarget.style.transform = 'translateY(0)';
+        e.currentTarget.style.boxShadow = 'none';
+        e.currentTarget.style.borderColor = '#e8e8e8';
       }}
     >
       {/* Thumbnail */}
-      <div style={{
-        flex: 1,
-        background: project.thumbnail ? `url(${project.thumbnail})` : '#ddd',
-        backgroundSize: 'cover',
-        backgroundPosition: 'center',
-        borderRadius: '10px',
-        marginBottom: '10px',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        color: '#999',
-        fontSize: '48px'
-      }}>
-        {!project.thumbnail && '📁'}
-      </div>
+      {project.thumbnail ? (
+        <div style={{
+          width: '100%',
+          height: '120px',
+          background: `url(${project.thumbnail})`,
+          backgroundSize: 'cover',
+          backgroundPosition: 'center',
+          borderRadius: '8px',
+          marginBottom: '8px'
+        }} />
+      ) : (
+        <div style={{
+          width: '100%',
+          height: '120px',
+          background: '#f0f0f0',
+          borderRadius: '8px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          fontSize: '48px',
+          marginBottom: '8px'
+        }}>
+          📁
+        </div>
+      )}
 
-      {/* Project Info */}
-      <div style={{ fontSize: '13px', fontWeight: '700', color: '#1a1a1a', marginBottom: '5px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-        Project #{project.id}
-      </div>
-      <div style={{ fontSize: '11px', color: '#666' }}>
-        {progress}% Complete
+      {/* Project Name */}
+      <h3 style={{
+        margin: 0,
+        fontSize: '16px',
+        fontWeight: '700',
+        color: '#1a1a1a',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap'
+      }}>
+        {project.name || `Project #${project.id}`}
+      </h3>
+
+      {/* Progress */}
+      <div>
+        <div style={{
+          background: '#e8e8e8',
+          height: '6px',
+          borderRadius: '3px',
+          overflow: 'hidden',
+          marginBottom: '6px'
+        }}>
+          <div style={{
+            background: '#da291c',
+            height: '100%',
+            width: `${progress}%`,
+            transition: 'width 0.3s ease'
+          }} />
+        </div>
+        <div style={{ fontSize: '12px', color: '#666', fontWeight: '600' }}>
+          {progress}% Complete
+        </div>
       </div>
 
       {/* Status Badge */}
       <div style={{
-        position: 'absolute',
-        top: '10px',
-        right: '10px',
-        width: '12px',
-        height: '12px',
-        borderRadius: '50%',
-        background: project.status === 'approved' ? '#28a745' : 
-                    project.status === 'denied' ? '#da291c' : '#ffa500'
-      }} />
+        display: 'inline-block',
+        padding: '4px 12px',
+        borderRadius: '12px',
+        background: status.bg,
+        color: status.text,
+        fontSize: '11px',
+        fontWeight: '700',
+        textTransform: 'uppercase',
+        letterSpacing: '0.5px',
+        alignSelf: 'flex-start'
+      }}>
+        {status.label}
+      </div>
     </div>
   );
 }
 
-function ExpandedProjectModal({ project, onClose, onApprove, onDeny, onComment, calculateProgress }) {
-  const [commentText, setCommentText] = useState('');
-  const progress = calculateProgress(project.tasks);
+function ProjectFormModal({ onSubmit, onCancel }) {
+  const [name, setName] = useState('');
+  const [issue, setIssue] = useState('');
+  const [solution, setSolution] = useState('');
+  const [taskInput, setTaskInput] = useState('');
+  const [tasks, setTasks] = useState([]);
+  const [thumbnail, setThumbnail] = useState(null);
 
-  const handleApprove = () => {
-    onApprove(commentText);
-    setCommentText('');
+  const handleThumbnailUpload = (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      setThumbnail(e.target.result);
+    };
+    reader.readAsDataURL(file);
   };
 
-  const handleDeny = () => {
-    if (commentText.trim()) {
-      onDeny(commentText);
-      setCommentText('');
-    } else {
-      alert('Please provide a reason for declining');
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    if (name && issue && solution && tasks.length > 0) {
+      onSubmit({ name, issue, solution, tasks, thumbnail });
     }
   };
 
-  const handleComment = () => {
-    if (commentText.trim()) {
-      onComment(commentText);
-      setCommentText('');
+  const addTask = () => {
+    if (taskInput.trim()) {
+      setTasks([...tasks, taskInput.trim()]);
+      setTaskInput('');
     }
+  };
+
+  const removeTask = (index) => {
+    setTasks(tasks.filter((_, i) => i !== index));
   };
 
   return (
@@ -537,7 +419,7 @@ function ExpandedProjectModal({ project, onClose, onApprove, onDeny, onComment, 
       left: 0,
       right: 0,
       bottom: 0,
-      background: 'rgba(0, 0, 0, 0.8)',
+      background: 'rgba(0, 0, 0, 0.7)',
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',
@@ -551,47 +433,478 @@ function ExpandedProjectModal({ project, onClose, onApprove, onDeny, onComment, 
           to { opacity: 1; }
         }
         @keyframes scaleIn {
-          from { 
-            transform: scale(0.95);
-            opacity: 0;
-          }
-          to { 
-            transform: scale(1);
-            opacity: 1;
-          }
+          from { transform: scale(0.95); opacity: 0; }
+          to { transform: scale(1); opacity: 1; }
         }
       `}</style>
-      <div style={{
+      <form onSubmit={handleSubmit} style={{
         background: 'white',
-        borderRadius: '20px',
-        maxWidth: '900px',
+        borderRadius: '12px',
+        padding: '40px',
+        maxWidth: '600px',
         width: '100%',
         maxHeight: '90vh',
         overflow: 'auto',
-        position: 'relative',
-        animation: 'scaleIn 0.3s ease-out'
+        boxShadow: '0 20px 60px rgba(0, 0, 0, 0.3)',
+        animation: 'scaleIn 0.3s ease-out',
+        position: 'relative'
       }}>
         <button
-          onClick={onClose}
+          type="button"
+          onClick={onCancel}
           style={{
             position: 'absolute',
-            top: '20px',
-            right: '20px',
+            top: '15px',
+            right: '15px',
             background: 'none',
             border: 'none',
             cursor: 'pointer',
             padding: '5px'
           }}
         >
-          <X size={28} />
+          <X size={24} />
         </button>
 
+        <h2 style={{ margin: '0 0 25px 0', fontSize: '24px', fontWeight: '700', color: '#1a1a1a' }}>
+          New Integration Project
+        </h2>
+
+        <div style={{ marginBottom: '20px' }}>
+          <label style={{ display: 'block', marginBottom: '8px', fontSize: '12px', fontWeight: '700', color: '#1a1a1a', textTransform: 'uppercase', letterSpacing: '1px' }}>
+            Project Name
+          </label>
+          <input
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="e.g., Automate Monthly Reports"
+            style={{
+              width: '100%',
+              padding: '12px 15px',
+              borderRadius: '4px',
+              border: '1px solid #ddd',
+              fontSize: '15px',
+              fontFamily: 'inherit',
+              boxSizing: 'border-box'
+            }}
+            required
+          />
+        </div>
+
+        <div style={{ marginBottom: '20px' }}>
+          <label style={{ display: 'block', marginBottom: '8px', fontSize: '12px', fontWeight: '700', color: '#1a1a1a', textTransform: 'uppercase', letterSpacing: '1px' }}>
+            What's the issue?
+          </label>
+          <textarea
+            value={issue}
+            onChange={(e) => setIssue(e.target.value)}
+            placeholder="Describe the problem or inefficiency..."
+            style={{
+              width: '100%',
+              padding: '12px 15px',
+              borderRadius: '4px',
+              border: '1px solid #ddd',
+              fontSize: '15px',
+              fontFamily: 'inherit',
+              resize: 'vertical',
+              minHeight: '80px',
+              boxSizing: 'border-box'
+            }}
+            required
+          />
+        </div>
+
+        <div style={{ marginBottom: '20px' }}>
+          <label style={{ display: 'block', marginBottom: '8px', fontSize: '12px', fontWeight: '700', color: '#1a1a1a', textTransform: 'uppercase', letterSpacing: '1px' }}>
+            Solution / Automation
+          </label>
+          <textarea
+            value={solution}
+            onChange={(e) => setSolution(e.target.value)}
+            placeholder="Explain the solution and expected outcomes..."
+            style={{
+              width: '100%',
+              padding: '12px 15px',
+              borderRadius: '4px',
+              border: '1px solid #ddd',
+              fontSize: '15px',
+              fontFamily: 'inherit',
+              resize: 'vertical',
+              minHeight: '80px',
+              boxSizing: 'border-box'
+            }}
+            required
+          />
+        </div>
+
+        <div style={{ marginBottom: '20px' }}>
+          <label style={{ display: 'block', marginBottom: '8px', fontSize: '12px', fontWeight: '700', color: '#1a1a1a', textTransform: 'uppercase', letterSpacing: '1px' }}>
+            Project Thumbnail (Optional)
+          </label>
+          <div style={{ display: 'flex', gap: '15px', alignItems: 'center' }}>
+            {thumbnail && (
+              <div style={{
+                width: '80px',
+                height: '80px',
+                background: `url(${thumbnail})`,
+                backgroundSize: 'cover',
+                backgroundPosition: 'center',
+                borderRadius: '8px',
+                border: '2px solid #e8e8e8'
+              }} />
+            )}
+            <label style={{
+              padding: '10px 20px',
+              borderRadius: '4px',
+              border: '2px dashed #da291c',
+              background: 'white',
+              color: '#da291c',
+              fontSize: '13px',
+              fontWeight: '700',
+              cursor: 'pointer',
+              textTransform: 'uppercase',
+              letterSpacing: '1px',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '8px'
+            }}>
+              <Plus size={16} />
+              {thumbnail ? 'Change' : 'Upload'}
+              <input
+                type="file"
+                accept="image/*"
+                onChange={handleThumbnailUpload}
+                style={{ display: 'none' }}
+              />
+            </label>
+          </div>
+        </div>
+
+        <div style={{ marginBottom: '20px' }}>
+          <label style={{ display: 'block', marginBottom: '8px', fontSize: '12px', fontWeight: '700', color: '#1a1a1a', textTransform: 'uppercase', letterSpacing: '1px' }}>
+            Implementation Steps
+          </label>
+          <div style={{ display: 'flex', gap: '10px', marginBottom: '12px' }}>
+            <input
+              type="text"
+              value={taskInput}
+              onChange={(e) => setTaskInput(e.target.value)}
+              onKeyPress={(e) => e.key === 'Enter' && (e.preventDefault(), addTask())}
+              placeholder="Add a step..."
+              style={{
+                flex: 1,
+                padding: '10px 12px',
+                borderRadius: '4px',
+                border: '1px solid #ddd',
+                fontSize: '14px',
+                fontFamily: 'inherit'
+              }}
+            />
+            <button
+              type="button"
+              onClick={addTask}
+              style={{
+                padding: '10px 20px',
+                borderRadius: '4px',
+                border: 'none',
+                background: '#da291c',
+                color: 'white',
+                fontSize: '13px',
+                fontWeight: '700',
+                cursor: 'pointer',
+                textTransform: 'uppercase',
+                letterSpacing: '1px'
+              }}
+            >
+              Add
+            </button>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            {tasks.map((task, idx) => (
+              <div key={idx} style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '10px',
+                padding: '10px 12px',
+                background: '#f9f9f9',
+                borderRadius: '4px',
+                border: '1px solid #e8e8e8'
+              }}>
+                <span style={{ flex: 1, fontSize: '14px', color: '#1a1a1a' }}>
+                  {idx + 1}. {task}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => removeTask(idx)}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    color: '#da291c',
+                    cursor: 'pointer',
+                    padding: '4px'
+                  }}
+                >
+                  <X size={16} />
+                </button>
+              </div>
+            ))}
+          </div>
+          {tasks.length === 0 && (
+            <p style={{ color: '#999', fontSize: '13px', margin: '10px 0 0 0' }}>
+              Add at least one step to continue
+            </p>
+          )}
+        </div>
+
+        <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end', marginTop: '25px' }}>
+          <button
+            type="button"
+            onClick={onCancel}
+            style={{
+              padding: '12px 24px',
+              borderRadius: '4px',
+              border: '1px solid #ddd',
+              background: 'white',
+              color: '#666',
+              fontSize: '14px',
+              fontWeight: '700',
+              cursor: 'pointer',
+              textTransform: 'uppercase',
+              letterSpacing: '1px'
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            disabled={!name || !issue || !solution || tasks.length === 0}
+            style={{
+              padding: '12px 32px',
+              borderRadius: '4px',
+              border: 'none',
+              background: name && issue && solution && tasks.length > 0 ? '#da291c' : '#e8e8e8',
+              color: 'white',
+              fontSize: '14px',
+              fontWeight: '700',
+              cursor: name && issue && solution && tasks.length > 0 ? 'pointer' : 'not-allowed',
+              textTransform: 'uppercase',
+              letterSpacing: '1px'
+            }}
+          >
+            Create
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function ProjectDetailModal({ project, onClose, onToggleTask, onDelete, onEdit, calculateProgress }) {
+  const [isEditing, setIsEditing] = useState(false);
+  const [editedName, setEditedName] = useState(project.name || '');
+  const [editedIssue, setEditedIssue] = useState(project.issue);
+  const [editedSolution, setEditedSolution] = useState(project.solution);
+
+  const progress = calculateProgress(project.tasks);
+  
+  const statusConfig = {
+    pending: { bg: '#fff8e6', text: '#ffa500', label: 'Pending Review' },
+    approved: { bg: '#f0f9f4', text: '#28a745', label: 'Approved' },
+    denied: { bg: '#fff5f5', text: '#da291c', label: 'Declined' }
+  };
+
+  const status = statusConfig[project.status] || statusConfig.pending;
+
+  const handleSave = () => {
+    onEdit(project.id, { name: editedName, issue: editedIssue, solution: editedSolution });
+    setIsEditing(false);
+  };
+
+  const handleDelete = () => {
+    onDelete(project.id);
+    onClose();
+  };
+
+  return (
+    <div style={{
+      position: 'fixed',
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
+      background: 'rgba(0, 0, 0, 0.7)',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      zIndex: 1000,
+      padding: '40px',
+      animation: 'fadeIn 0.2s ease-out'
+    }}>
+      <div style={{
+        background: 'white',
+        borderRadius: '12px',
+        maxWidth: '900px',
+        width: '100%',
+        maxHeight: '90vh',
+        overflow: 'auto',
+        boxShadow: '0 20px 60px rgba(0, 0, 0, 0.3)',
+        animation: 'scaleIn 0.3s ease-out',
+        position: 'relative'
+      }}>
         <div style={{ padding: '40px' }}>
-          <h2 style={{ margin: '0 0 10px 0', fontSize: '32px', fontWeight: '700', color: '#1a1a1a' }}>
-            Project #{project.id}
-          </h2>
-          <div style={{ fontSize: '14px', color: '#666', marginBottom: '30px' }}>
-            Created {new Date(project.createdAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}
+          <button
+            onClick={onClose}
+            style={{
+              position: 'absolute',
+              top: '20px',
+              right: '20px',
+              background: 'none',
+              border: 'none',
+              cursor: 'pointer',
+              padding: '5px'
+            }}
+          >
+            <X size={28} />
+          </button>
+
+          {/* Header with Status */}
+          <div style={{ marginBottom: '30px' }}>
+            <div style={{
+              display: 'inline-block',
+              padding: '6px 16px',
+              borderRadius: '20px',
+              background: status.bg,
+              color: status.text,
+              fontSize: '12px',
+              fontWeight: '700',
+              textTransform: 'uppercase',
+              letterSpacing: '1px',
+              marginBottom: '15px'
+            }}>
+              {status.label}
+            </div>
+
+            {isEditing ? (
+              <input
+                type="text"
+                value={editedName}
+                onChange={(e) => setEditedName(e.target.value)}
+                style={{
+                  width: '100%',
+                  fontSize: '28px',
+                  fontWeight: '700',
+                  border: '2px solid #e8e8e8',
+                  borderRadius: '6px',
+                  padding: '10px 15px',
+                  fontFamily: 'inherit',
+                  marginBottom: '10px'
+                }}
+              />
+            ) : (
+              <h2 style={{ margin: '0 0 10px 0', fontSize: '28px', fontWeight: '700', color: '#1a1a1a' }}>
+                {project.name || `Project #${project.id}`}
+              </h2>
+            )}
+            
+            <div style={{ fontSize: '14px', color: '#666' }}>
+              Created {new Date(project.createdAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}
+            </div>
+          </div>
+
+          {/* Action Buttons */}
+          <div style={{ display: 'flex', gap: '10px', marginBottom: '30px' }}>
+            {!isEditing ? (
+              <>
+                <button
+                  onClick={() => setIsEditing(true)}
+                  style={{
+                    padding: '10px 20px',
+                    borderRadius: '6px',
+                    border: '2px solid #da291c',
+                    background: 'white',
+                    color: '#da291c',
+                    fontSize: '13px',
+                    fontWeight: '700',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    textTransform: 'uppercase',
+                    letterSpacing: '1px'
+                  }}
+                >
+                  <Edit2 size={14} />
+                  Edit
+                </button>
+                <button
+                  onClick={handleDelete}
+                  style={{
+                    padding: '10px 20px',
+                    borderRadius: '6px',
+                    border: '2px solid #999',
+                    background: 'white',
+                    color: '#999',
+                    fontSize: '13px',
+                    fontWeight: '700',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    textTransform: 'uppercase',
+                    letterSpacing: '1px'
+                  }}
+                >
+                  <Trash2 size={14} />
+                  Delete
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  onClick={handleSave}
+                  style={{
+                    padding: '10px 20px',
+                    borderRadius: '6px',
+                    border: 'none',
+                    background: '#da291c',
+                    color: 'white',
+                    fontSize: '13px',
+                    fontWeight: '700',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    textTransform: 'uppercase',
+                    letterSpacing: '1px'
+                  }}
+                >
+                  <Save size={14} />
+                  Save
+                </button>
+                <button
+                  onClick={() => {
+                    setEditedName(project.name || '');
+                    setEditedIssue(project.issue);
+                    setEditedSolution(project.solution);
+                    setIsEditing(false);
+                  }}
+                  style={{
+                    padding: '10px 20px',
+                    borderRadius: '6px',
+                    border: '2px solid #ddd',
+                    background: 'white',
+                    color: '#666',
+                    fontSize: '13px',
+                    fontWeight: '700',
+                    cursor: 'pointer',
+                    textTransform: 'uppercase',
+                    letterSpacing: '1px'
+                  }}
+                >
+                  Cancel
+                </button>
+              </>
+            )}
           </div>
 
           {/* Progress */}
@@ -615,17 +928,53 @@ function ExpandedProjectModal({ project, onClose, onApprove, onDeny, onComment, 
               <h3 style={{ margin: '0 0 10px 0', fontSize: '14px', fontWeight: '700', color: '#da291c', textTransform: 'uppercase', letterSpacing: '1px' }}>
                 Issue
               </h3>
-              <p style={{ margin: 0, fontSize: '15px', lineHeight: '1.6', color: '#1a1a1a' }}>
-                {project.issue}
-              </p>
+              {isEditing ? (
+                <textarea
+                  value={editedIssue}
+                  onChange={(e) => setEditedIssue(e.target.value)}
+                  style={{
+                    width: '100%',
+                    padding: '12px',
+                    borderRadius: '6px',
+                    border: '2px solid #e8e8e8',
+                    fontSize: '14px',
+                    fontFamily: 'inherit',
+                    resize: 'vertical',
+                    minHeight: '100px',
+                    boxSizing: 'border-box'
+                  }}
+                />
+              ) : (
+                <p style={{ margin: 0, fontSize: '15px', lineHeight: '1.6', color: '#1a1a1a' }}>
+                  {project.issue}
+                </p>
+              )}
             </div>
             <div>
               <h3 style={{ margin: '0 0 10px 0', fontSize: '14px', fontWeight: '700', color: '#da291c', textTransform: 'uppercase', letterSpacing: '1px' }}>
                 Solution
               </h3>
-              <p style={{ margin: 0, fontSize: '15px', lineHeight: '1.6', color: '#1a1a1a' }}>
-                {project.solution}
-              </p>
+              {isEditing ? (
+                <textarea
+                  value={editedSolution}
+                  onChange={(e) => setEditedSolution(e.target.value)}
+                  style={{
+                    width: '100%',
+                    padding: '12px',
+                    borderRadius: '6px',
+                    border: '2px solid #e8e8e8',
+                    fontSize: '14px',
+                    fontFamily: 'inherit',
+                    resize: 'vertical',
+                    minHeight: '100px',
+                    boxSizing: 'border-box'
+                  }}
+                />
+              ) : (
+                <p style={{ margin: 0, fontSize: '15px', lineHeight: '1.6', color: '#1a1a1a' }}>
+                  {project.solution}
+                </p>
+              )}
             </div>
           </div>
 
@@ -636,15 +985,21 @@ function ExpandedProjectModal({ project, onClose, onApprove, onDeny, onComment, 
             </h3>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
               {project.tasks.map((task, idx) => (
-                <div key={task.id} style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '12px',
-                  padding: '12px 15px',
-                  background: task.completed ? '#f9f9f9' : 'white',
-                  border: `1px solid ${task.completed ? '#da291c' : '#e8e8e8'}`,
-                  borderRadius: '8px'
-                }}>
+                <div
+                  key={task.id}
+                  onClick={() => onToggleTask(project.id, task.id)}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '12px',
+                    padding: '12px 15px',
+                    background: task.completed ? '#f9f9f9' : 'white',
+                    border: `1px solid ${task.completed ? '#da291c' : '#e8e8e8'}`,
+                    borderRadius: '8px',
+                    cursor: 'pointer',
+                    transition: 'all 0.2s ease'
+                  }}
+                >
                   {task.completed ? <CheckCircle2 size={18} color="#da291c" /> : <Circle size={18} color="#ccc" />}
                   <span style={{ flex: 1, fontSize: '14px', color: task.completed ? '#999' : '#1a1a1a', textDecoration: task.completed ? 'line-through' : 'none' }}>
                     {idx + 1}. {task.text}
@@ -656,9 +1011,9 @@ function ExpandedProjectModal({ project, onClose, onApprove, onDeny, onComment, 
 
           {/* Comments */}
           {project.comments.length > 0 && (
-            <div style={{ marginBottom: '30px', paddingTop: '30px', borderTop: '2px solid #f0f0f0' }}>
+            <div style={{ paddingTop: '30px', borderTop: '2px solid #f0f0f0' }}>
               <h3 style={{ margin: '0 0 15px 0', fontSize: '14px', fontWeight: '700', color: '#da291c', textTransform: 'uppercase', letterSpacing: '1px' }}>
-                Review History
+                Feedback from Leadership
               </h3>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
                 {project.comments.map((comment, idx) => (
@@ -677,72 +1032,6 @@ function ExpandedProjectModal({ project, onClose, onApprove, onDeny, onComment, 
               </div>
             </div>
           )}
-
-          {/* Actions */}
-          <div style={{ paddingTop: '30px', borderTop: '2px solid #f0f0f0' }}>
-            <textarea
-              value={commentText}
-              onChange={(e) => setCommentText(e.target.value)}
-              placeholder="Add feedback or instructions..."
-              style={{
-                width: '100%',
-                padding: '15px',
-                borderRadius: '8px',
-                border: '2px solid #e8e8e8',
-                fontSize: '14px',
-                fontFamily: 'inherit',
-                resize: 'vertical',
-                minHeight: '100px',
-                marginBottom: '15px',
-                boxSizing: 'border-box'
-              }}
-            />
-            <div style={{ display: 'flex', gap: '10px' }}>
-              <button onClick={handleComment} disabled={!commentText.trim()} style={{
-                padding: '12px 24px',
-                borderRadius: '8px',
-                border: '2px solid #1a1a1a',
-                background: 'white',
-                color: '#1a1a1a',
-                fontSize: '13px',
-                fontWeight: '700',
-                cursor: commentText.trim() ? 'pointer' : 'not-allowed',
-                opacity: commentText.trim() ? 1 : 0.5,
-                textTransform: 'uppercase',
-                letterSpacing: '1px'
-              }}>
-                Comment
-              </button>
-              <button onClick={handleApprove} style={{
-                padding: '12px 24px',
-                borderRadius: '8px',
-                border: 'none',
-                background: '#28a745',
-                color: 'white',
-                fontSize: '13px',
-                fontWeight: '700',
-                cursor: 'pointer',
-                textTransform: 'uppercase',
-                letterSpacing: '1px'
-              }}>
-                Approve
-              </button>
-              <button onClick={handleDeny} style={{
-                padding: '12px 24px',
-                borderRadius: '8px',
-                border: 'none',
-                background: '#da291c',
-                color: 'white',
-                fontSize: '13px',
-                fontWeight: '700',
-                cursor: 'pointer',
-                textTransform: 'uppercase',
-                letterSpacing: '1px'
-              }}>
-                Decline
-              </button>
-            </div>
-          </div>
         </div>
       </div>
     </div>
