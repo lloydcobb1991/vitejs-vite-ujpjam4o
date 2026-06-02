@@ -1,0 +1,597 @@
+import React, { useState } from 'react';
+import Emberwatch from './Emberwatch';
+
+// ---------------------------------------------------------------------------
+// Tool registry
+// ---------------------------------------------------------------------------
+// Each tool entry: id, name, description, docsUrl (optional), and the
+// component to render. If `component` is null, the tool is marked Coming Soon
+// in the sidebar and the welcome panel is shown instead when selected.
+
+const TOOLS = [
+  {
+    id: 'crucible',
+    name: 'The Crucible',
+    description: 'Create projects to be approved.',
+    docsUrl: null,
+    component: null,
+  },
+  {
+    id: 'forge',
+    name: 'The Forge',
+    description: 'Review and approve projects.',
+    docsUrl: null,
+    component: null,
+  },
+  {
+    id: 'refinery',
+    name: 'The Refinery',
+    description: 'Transform Cereus reports to client-ready format.',
+    docsUrl: null,
+    component: null,
+  },
+  {
+    id: 'beacon',
+    name: 'The Beacon',
+    description: 'Hunt for prospects and opportunities.',
+    docsUrl: null,
+    component: null,
+  },
+  {
+    id: 'emberwatch',
+    name: 'Emberwatch',
+    description: 'Track and count menu brand impressions.',
+    docsUrl: null,
+    component: Emberwatch,
+  },
+];
+
+// Shared color tokens so we never drift between values.
+const COLOR = {
+  red: '#da291c',
+  redHover: '#b8221a',
+  charcoal: '#1a1a1a',
+  charcoalLight: '#262626',
+  white: '#ffffff',
+  contentBg: '#ffffff',
+  footerBg: '#f5f5f5',
+  textMuted: '#8a8a8a',
+  textDim: '#6f6f6f',
+};
+
+// ===========================================================================
+// AppShell
+// ===========================================================================
+
+export default function AppShell() {
+  const [activeId, setActiveId] = useState(null);
+
+  const activeTool = TOOLS.find((t) => t.id === activeId) || null;
+  const ActiveComponent = activeTool?.component || null;
+
+  return (
+    <div
+      style={{
+        minHeight: '100vh',
+        display: 'flex',
+        flexDirection: 'column',
+        fontFamily: '"Brandon Grotesque", "Helvetica Neue", Arial, sans-serif',
+        color: COLOR.charcoal,
+        background: COLOR.contentBg,
+      }}
+    >
+      <style>{`
+        @import url('https://use.typekit.net/gfb2mjm.css');
+      `}</style>
+
+      {/* Main area: sidebar + content */}
+      <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
+        <Sidebar
+          activeId={activeId}
+          activeTool={activeTool}
+          onSelect={(id) => {
+            // Clicking the already-active tool does nothing
+            if (id === activeId) return;
+            setActiveId(id);
+          }}
+        />
+
+        <main
+          style={{
+            flex: 1,
+            background: COLOR.contentBg,
+            overflow: 'auto',
+            display: 'flex',
+            flexDirection: 'column',
+          }}
+        >
+          {activeTool ? (
+            <>
+              <ToolHeader tool={activeTool} />
+              <div style={{ flex: 1 }}>
+                {ActiveComponent ? (
+                  <ActiveComponent />
+                ) : (
+                  <ComingSoonPanel tool={activeTool} />
+                )}
+              </div>
+            </>
+          ) : (
+            <WelcomePanel />
+          )}
+        </main>
+      </div>
+
+      <BottomBar />
+    </div>
+  );
+}
+
+// ===========================================================================
+// Sidebar
+// ===========================================================================
+
+function Sidebar({ activeId, activeTool, onSelect }) {
+  return (
+    <aside
+      style={{
+        width: '260px',
+        flexShrink: 0,
+        background: COLOR.charcoal,
+        display: 'flex',
+        flexDirection: 'column',
+      }}
+    >
+      <LogoBlock activeTool={activeTool} />
+
+      <nav
+        style={{
+          flex: 1,
+          padding: '24px 0',
+          display: 'flex',
+          flexDirection: 'column',
+        }}
+      >
+        {TOOLS.map((tool) => (
+          <SidebarItem
+            key={tool.id}
+            tool={tool}
+            isActive={tool.id === activeId}
+            onSelect={() => onSelect(tool.id)}
+          />
+        ))}
+      </nav>
+
+      <SidebarFooter />
+    </aside>
+  );
+}
+
+// The top-of-sidebar logo block. Red background. Shows the active tool's
+// PNG/GIF when a tool is selected; shows a small Ignite mark otherwise.
+function LogoBlock({ activeTool }) {
+  return (
+    <div
+      style={{
+        background: COLOR.red,
+        height: '160px',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        position: 'relative',
+        overflow: 'hidden',
+      }}
+    >
+      {activeTool ? (
+        <ActiveToolLogo tool={activeTool} />
+      ) : (
+        <div
+          style={{
+            color: COLOR.white,
+            fontSize: '22px',
+            fontWeight: '800',
+            letterSpacing: '2px',
+            textTransform: 'uppercase',
+            textAlign: 'center',
+            lineHeight: 1.2,
+            padding: '0 16px',
+          }}
+        >
+          Ignite
+          <div style={{ fontSize: '11px', fontWeight: '600', opacity: 0.75, letterSpacing: '3px', marginTop: '4px' }}>
+            Creative Services
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ActiveToolLogo({ tool }) {
+  // Plays the GIF once on selection, then snaps back to the static PNG.
+  // We do this by keying both <img>s on tool.id; React will rebuild them
+  // when the tool changes, retriggering the GIF from frame 1.
+  const [animationDone, setAnimationDone] = useState(false);
+
+  React.useEffect(() => {
+    setAnimationDone(false);
+    // Most tool GIFs are short; 1.5s is a safe upper bound.
+    const t = setTimeout(() => setAnimationDone(true), 1500);
+    return () => clearTimeout(t);
+  }, [tool.id]);
+
+  return (
+    <div
+      style={{
+        width: '96px',
+        height: '96px',
+        position: 'relative',
+      }}
+    >
+      <img
+        key={`${tool.id}-png`}
+        src={`/${tool.id}.png`}
+        alt={tool.name}
+        style={{
+          width: '96px',
+          height: '96px',
+          objectFit: 'contain',
+          position: 'absolute',
+          inset: 0,
+          opacity: animationDone ? 1 : 0,
+          transition: 'opacity 0.3s ease',
+        }}
+      />
+      <img
+        key={`${tool.id}-gif`}
+        src={`/${tool.id}.gif`}
+        alt={tool.name}
+        style={{
+          width: '96px',
+          height: '96px',
+          objectFit: 'contain',
+          position: 'absolute',
+          inset: 0,
+          opacity: animationDone ? 0 : 1,
+          transition: 'opacity 0.3s ease',
+        }}
+      />
+    </div>
+  );
+}
+
+function SidebarItem({ tool, isActive, onSelect }) {
+  const [isHovered, setIsHovered] = useState(false);
+  const isAvailable = tool.component !== null;
+
+  return (
+    <button
+      onClick={onSelect}
+      onMouseEnter={() => setIsHovered(true)}
+      onMouseLeave={() => setIsHovered(false)}
+      style={{
+        position: 'relative',
+        background: isActive
+          ? COLOR.charcoalLight
+          : isHovered
+            ? 'rgba(255,255,255,0.04)'
+            : 'transparent',
+        color: isActive
+          ? COLOR.white
+          : isAvailable
+            ? 'rgba(255,255,255,0.85)'
+            : 'rgba(255,255,255,0.4)',
+        border: 'none',
+        textAlign: 'left',
+        padding: '14px 24px 14px 28px',
+        fontSize: '15px',
+        fontWeight: isActive ? '800' : '600',
+        cursor: isActive ? 'default' : 'pointer',
+        letterSpacing: '0.2px',
+        transition: 'background 0.15s ease, color 0.15s ease',
+        fontFamily: 'inherit',
+        // Red left bar on the active item
+        borderLeft: isActive
+          ? `3px solid ${COLOR.red}`
+          : '3px solid transparent',
+      }}
+    >
+      {tool.name}
+      {!isAvailable && (
+        <span
+          style={{
+            fontSize: '10px',
+            fontWeight: '700',
+            letterSpacing: '1px',
+            color: 'rgba(255,255,255,0.4)',
+            marginLeft: '8px',
+            textTransform: 'uppercase',
+          }}
+        >
+          Soon
+        </span>
+      )}
+    </button>
+  );
+}
+
+function SidebarFooter() {
+  return (
+    <div
+      style={{
+        padding: '20px 28px 24px',
+        borderTop: '1px solid rgba(255,255,255,0.06)',
+      }}
+    >
+      <a
+        href="mailto:lloyd@ignitecs.co?subject=Tools Portal Help"
+        style={{
+          color: 'rgba(255,255,255,0.7)',
+          fontSize: '13px',
+          fontWeight: '600',
+          textDecoration: 'none',
+          display: 'block',
+          marginBottom: '10px',
+        }}
+        onMouseOver={(e) => (e.currentTarget.style.color = COLOR.white)}
+        onMouseOut={(e) => (e.currentTarget.style.color = 'rgba(255,255,255,0.7)')}
+      >
+        Need help?
+      </a>
+      <div
+        style={{
+          color: 'rgba(255,255,255,0.35)',
+          fontSize: '11px',
+          letterSpacing: '1px',
+          textTransform: 'uppercase',
+          fontWeight: '600',
+        }}
+      >
+        Build (Beta) v0.2
+      </div>
+    </div>
+  );
+}
+
+// ===========================================================================
+// Tool header — sits above the tool's content, shows name + description + docs
+// ===========================================================================
+
+function ToolHeader({ tool }) {
+  return (
+    <div
+      style={{
+        padding: '28px 40px 24px',
+        borderBottom: '1px solid #ececec',
+        background: COLOR.contentBg,
+        display: 'flex',
+        alignItems: 'baseline',
+        justifyContent: 'space-between',
+        gap: '24px',
+        flexWrap: 'wrap',
+      }}
+    >
+      <div>
+        <h1
+          style={{
+            margin: 0,
+            fontSize: '28px',
+            fontWeight: '800',
+            color: COLOR.charcoal,
+            letterSpacing: '-0.5px',
+            lineHeight: 1.2,
+          }}
+        >
+          {tool.name}
+        </h1>
+        <p
+          style={{
+            margin: '6px 0 0 0',
+            fontSize: '14px',
+            color: COLOR.textDim,
+            fontWeight: '500',
+          }}
+        >
+          {tool.description}
+        </p>
+      </div>
+      {tool.docsUrl && (
+        <a
+          href={tool.docsUrl}
+          target="_blank"
+          rel="noreferrer"
+          style={{
+            fontSize: '13px',
+            fontWeight: '700',
+            color: COLOR.red,
+            textDecoration: 'none',
+            letterSpacing: '0.5px',
+            textTransform: 'uppercase',
+          }}
+          onMouseOver={(e) => (e.currentTarget.style.color = COLOR.redHover)}
+          onMouseOut={(e) => (e.currentTarget.style.color = COLOR.red)}
+        >
+          Documentation &rarr;
+        </a>
+      )}
+    </div>
+  );
+}
+
+// ===========================================================================
+// Welcome / empty-state panel
+// ===========================================================================
+
+function WelcomePanel() {
+  return (
+    <div
+      style={{
+        flex: 1,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: '60px 40px',
+      }}
+    >
+      <div style={{ maxWidth: '480px', textAlign: 'center' }}>
+        <h1
+          style={{
+            margin: 0,
+            fontSize: '36px',
+            fontWeight: '800',
+            color: COLOR.charcoal,
+            letterSpacing: '-1px',
+            lineHeight: 1.15,
+          }}
+        >
+          Ignite Creative Services
+        </h1>
+        <div
+          style={{
+            width: '40px',
+            height: '2px',
+            background: COLOR.red,
+            margin: '20px auto 24px',
+            borderRadius: '2px',
+          }}
+        />
+        <p
+          style={{
+            fontSize: '16px',
+            color: COLOR.textDim,
+            lineHeight: 1.6,
+            margin: 0,
+          }}
+        >
+          Welcome to the internal tools portal. Pick a tool from the sidebar to
+          get started.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ===========================================================================
+// Coming Soon panel — shown for tools whose component isn't built yet
+// ===========================================================================
+
+function ComingSoonPanel({ tool }) {
+  return (
+    <div
+      style={{
+        flex: 1,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: '60px 40px',
+      }}
+    >
+      <div style={{ maxWidth: '420px', textAlign: 'center' }}>
+        <div
+          style={{
+            fontSize: '11px',
+            fontWeight: '800',
+            color: COLOR.red,
+            letterSpacing: '3px',
+            textTransform: 'uppercase',
+            marginBottom: '14px',
+          }}
+        >
+          Coming Soon
+        </div>
+        <h2
+          style={{
+            margin: 0,
+            fontSize: '28px',
+            fontWeight: '800',
+            color: COLOR.charcoal,
+            letterSpacing: '-0.5px',
+            lineHeight: 1.2,
+          }}
+        >
+          {tool.name}
+        </h2>
+        <p
+          style={{
+            marginTop: '12px',
+            fontSize: '15px',
+            color: COLOR.textDim,
+            lineHeight: 1.6,
+          }}
+        >
+          {tool.description}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ===========================================================================
+// Bottom bar — runs full-width below content area
+// ===========================================================================
+
+function BottomBar() {
+  const linkStyle = {
+    color: COLOR.textDim,
+    fontSize: '13px',
+    fontWeight: '600',
+    textDecoration: 'none',
+    padding: '0 14px',
+    transition: 'color 0.15s ease',
+  };
+
+  return (
+    <footer
+      style={{
+        background: COLOR.footerBg,
+        padding: '14px 28px',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: '16px',
+        borderTop: '1px solid #ececec',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center' }}>
+        <FooterLink href="https://docs.ignitecs.co" style={linkStyle}>
+          Documentation
+        </FooterLink>
+        <span style={{ color: '#d0d0d0' }}>|</span>
+        <FooterLink href="https://ignitecs.co" style={linkStyle}>
+          Ignite Home
+        </FooterLink>
+        <span style={{ color: '#d0d0d0' }}>|</span>
+        <FooterLink href="https://connect.ignitecs.co" style={linkStyle}>
+          Ignite Connect
+        </FooterLink>
+      </div>
+
+      <div
+        style={{
+          fontSize: '13px',
+          fontWeight: '800',
+          color: COLOR.charcoal,
+          letterSpacing: '0.5px',
+        }}
+      >
+        IGNITE<span style={{ color: COLOR.red }}>CS</span>
+        <sup style={{ fontSize: '8px', marginLeft: '2px', color: COLOR.textMuted }}>™</sup>
+      </div>
+    </footer>
+  );
+}
+
+function FooterLink({ href, style, children }) {
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      style={style}
+      onMouseOver={(e) => (e.currentTarget.style.color = COLOR.charcoal)}
+      onMouseOut={(e) => (e.currentTarget.style.color = COLOR.textDim)}
+    >
+      {children}
+    </a>
+  );
+}
