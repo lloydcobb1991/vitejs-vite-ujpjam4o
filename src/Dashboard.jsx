@@ -175,7 +175,6 @@ function ToolCard({ tool, onClick, delay }) {
         padding: '36px 28px 32px',
         cursor: 'pointer',
         border: 'none',
-        borderLeft: '3px solid #2d2d2d',
         transition:
           'background 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease',
         transform: isHovered ? 'translateY(-3px)' : 'translateY(0)',
