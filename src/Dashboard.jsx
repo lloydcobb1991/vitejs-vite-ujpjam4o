@@ -55,7 +55,7 @@ export default function Dashboard({ onSelectTool }) {
           position: 'fixed',
           top: '24px',
           right: '24px',
-          background: '#da291c',
+          background: '#2d2d2d',
           color: 'white',
           padding: '10px 18px',
           borderRadius: '8px',
@@ -63,19 +63,19 @@ export default function Dashboard({ onSelectTool }) {
           fontWeight: '600',
           textDecoration: 'none',
           letterSpacing: '0.3px',
-          boxShadow: '0 2px 8px rgba(218, 41, 28, 0.18)',
+          boxShadow: '0 2px 8px rgba(0, 0, 0, 0.12)',
           transition: 'background 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease',
           zIndex: 1000,
         }}
         onMouseOver={(e) => {
-          e.currentTarget.style.background = '#2d2d2d';
+          e.currentTarget.style.background = '#da291c';
           e.currentTarget.style.transform = 'translateY(-1px)';
-          e.currentTarget.style.boxShadow = '0 4px 12px rgba(0, 0, 0, 0.12)';
+          e.currentTarget.style.boxShadow = '0 4px 12px rgba(218, 41, 28, 0.25)';
         }}
         onMouseOut={(e) => {
-          e.currentTarget.style.background = '#da291c';
+          e.currentTarget.style.background = '#2d2d2d';
           e.currentTarget.style.transform = 'translateY(0)';
-          e.currentTarget.style.boxShadow = '0 2px 8px rgba(218, 41, 28, 0.18)';
+          e.currentTarget.style.boxShadow = '0 2px 8px rgba(0, 0, 0, 0.12)';
         }}
       >
         Issues or Ideas? Contact Lloyd
@@ -170,18 +170,18 @@ function ToolCard({ tool, onClick, delay }) {
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
       style={{
-        background: '#FFFFFF',
+        background: isHovered ? '#2d2d2d' : '#da291c',
         borderRadius: '12px',
         padding: '36px 28px 32px',
         cursor: 'pointer',
-        border: '1px solid #ececec',
-        borderLeft: '3px solid #da291c',
+        border: 'none',
+        borderLeft: '3px solid #2d2d2d',
         transition:
-          'transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease',
+          'background 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease',
         transform: isHovered ? 'translateY(-3px)' : 'translateY(0)',
         boxShadow: isHovered
-          ? '0 10px 28px rgba(0, 0, 0, 0.08)'
-          : '0 1px 3px rgba(0, 0, 0, 0.04)',
+          ? '0 12px 32px rgba(0, 0, 0, 0.18)'
+          : '0 2px 8px rgba(218, 41, 28, 0.18)',
         animation: `fadeInUp 0.5s ease-out ${delay}s both`,
         position: 'relative',
         overflow: 'hidden',
@@ -239,8 +239,7 @@ function ToolCard({ tool, onClick, delay }) {
             margin: '0 0 8px 0',
             fontSize: '20px',
             fontWeight: '700',
-            color: isHovered ? '#da291c' : '#1a1a1a',
-            transition: 'color 0.2s ease',
+            color: '#ffffff',
             letterSpacing: '-0.3px',
           }}
         >
@@ -250,7 +249,7 @@ function ToolCard({ tool, onClick, delay }) {
           style={{
             margin: 0,
             fontSize: '14px',
-            color: '#6f6f6f',
+            color: 'rgba(255, 255, 255, 0.85)',
             lineHeight: '1.5',
           }}
         >
@@ -264,7 +263,7 @@ function ToolCard({ tool, onClick, delay }) {
           position: 'absolute',
           bottom: '14px',
           right: '18px',
-          color: '#da291c',
+          color: '#ffffff',
           fontSize: '18px',
           fontWeight: '700',
           opacity: isHovered ? 1 : 0,
@@ -272,6 +271,8 @@ function ToolCard({ tool, onClick, delay }) {
           transition: 'opacity 0.2s ease, transform 0.2s ease',
         }}
       >
+        →
+      </div>
         →
       </div>
     </div>
