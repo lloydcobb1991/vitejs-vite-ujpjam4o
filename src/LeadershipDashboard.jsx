@@ -4,7 +4,7 @@ import { CheckCircle2, Circle, MessageSquare, ThumbsUp, ThumbsDown, Clock, Calen
 export default function LeadershipDashboard() {
   const [projects, setProjects] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [filter, setFilter] = useState('active'); // active or pending
+  const [filter, setFilter] = useState('pending'); // pending is the default — reviewers land on what needs review
   const [selectedProject, setSelectedProject] = useState(null);
   const [expandedProject, setExpandedProject] = useState(null);
 
@@ -141,22 +141,6 @@ export default function LeadershipDashboard() {
             width: 'fit-content'
           }}>
             <button
-              onClick={() => setFilter('active')}
-              style={{
-                padding: '10px 30px',
-                borderRadius: '25px',
-                border: 'none',
-                background: filter === 'active' ? '#da291c' : 'transparent',
-                color: filter === 'active' ? 'white' : '#666',
-                fontSize: '14px',
-                fontWeight: '700',
-                cursor: 'pointer',
-                transition: 'all 0.2s ease'
-              }}
-            >
-              Active
-            </button>
-            <button
               onClick={() => setFilter('pending')}
               style={{
                 padding: '10px 30px',
@@ -171,6 +155,22 @@ export default function LeadershipDashboard() {
               }}
             >
               Pending
+            </button>
+            <button
+              onClick={() => setFilter('active')}
+              style={{
+                padding: '10px 30px',
+                borderRadius: '25px',
+                border: 'none',
+                background: filter === 'active' ? '#da291c' : 'transparent',
+                color: filter === 'active' ? 'white' : '#666',
+                fontSize: '14px',
+                fontWeight: '700',
+                cursor: 'pointer',
+                transition: 'all 0.2s ease'
+              }}
+            >
+              Active
             </button>
           </div>
         </div>

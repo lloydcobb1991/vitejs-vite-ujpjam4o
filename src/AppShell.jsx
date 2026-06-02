@@ -76,16 +76,21 @@ export default function AppShell() {
   return (
     <div
       style={{
-        minHeight: '100vh',
+        height: '100vh',
         display: 'flex',
         flexDirection: 'column',
         fontFamily: '"Brandon Grotesque", "Helvetica Neue", Arial, sans-serif',
         color: COLOR.charcoal,
         background: COLOR.contentBg,
+        overflow: 'hidden',
       }}
     >
       <style>{`
         @import url('https://use.typekit.net/gfb2mjm.css');
+        @keyframes shellFadeIn {
+          from { opacity: 0; transform: translateY(4px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
       `}</style>
 
       {/* Main area: sidebar + content */}
@@ -109,20 +114,30 @@ export default function AppShell() {
             flexDirection: 'column',
           }}
         >
-          {activeTool ? (
-            <>
-              <ToolHeader tool={activeTool} />
-              <div style={{ flex: 1 }}>
-                {ActiveComponent ? (
-                  <ActiveComponent />
-                ) : (
-                  <ComingSoonPanel tool={activeTool} />
-                )}
-              </div>
-            </>
-          ) : (
-            <WelcomePanel />
-          )}
+          <div
+            key={activeId || 'welcome'}
+            style={{
+              flex: 1,
+              display: 'flex',
+              flexDirection: 'column',
+              animation: 'shellFadeIn 0.25s ease-out',
+            }}
+          >
+            {activeTool ? (
+              <>
+                <ToolHeader tool={activeTool} />
+                <div style={{ flex: 1 }}>
+                  {ActiveComponent ? (
+                    <ActiveComponent />
+                  ) : (
+                    <ComingSoonPanel tool={activeTool} />
+                  )}
+                </div>
+              </>
+            ) : (
+              <WelcomePanel />
+            )}
+          </div>
         </main>
       </div>
 
@@ -174,8 +189,12 @@ function Sidebar({ activeId, activeTool, onSelect }) {
 // The top-of-sidebar logo block. Red background. Shows the active tool's
 // PNG/GIF when a tool is selected; shows a small Ignite mark otherwise.
 function LogoBlock({ activeTool }) {
+  const [isHovered, setIsHovered] = useState(false);
+
   return (
     <div
+      onMouseEnter={() => setIsHovered(true)}
+      onMouseLeave={() => setIsHovered(false)}
       style={{
         background: COLOR.red,
         height: '160px',
@@ -184,14 +203,14 @@ function LogoBlock({ activeTool }) {
         justifyContent: 'center',
         position: 'relative',
         overflow: 'hidden',
-        // Inset shadow gives the block visual definition against the
-        // sidebar without adding a hard border line.
+        // 4px white frame around the block, plus the inset shadow for depth
+        border: '4px solid white',
+        boxSizing: 'border-box',
         boxShadow: 'inset 0 -1px 0 rgba(0,0,0,0.25), inset 0 1px 0 rgba(255,255,255,0.06)',
-        borderBottom: '1px solid rgba(0,0,0,0.15)',
       }}
     >
       {activeTool ? (
-        <ActiveToolLogo tool={activeTool} />
+        <ActiveToolLogo tool={activeTool} isHovered={isHovered} />
       ) : (
         <div
           style={{
@@ -215,18 +234,30 @@ function LogoBlock({ activeTool }) {
   );
 }
 
-function ActiveToolLogo({ tool }) {
-  // Plays the GIF once on selection, then snaps back to the static PNG.
-  // We do this by keying both <img>s on tool.id; React will rebuild them
-  // when the tool changes, retriggering the GIF from frame 1.
+function ActiveToolLogo({ tool, isHovered }) {
+  // Plays the GIF once on tool selection (3s), then fades to the static PNG.
+  // Hovering the logo block replays the GIF from frame 1.
+  // We trigger replay by bumping a counter that becomes part of the <img> key,
+  // forcing React to unmount/remount the GIF (re-requesting the file).
   const [animationDone, setAnimationDone] = useState(false);
+  const [hoverCount, setHoverCount] = useState(0);
 
+  // Initial play on tool selection
   React.useEffect(() => {
     setAnimationDone(false);
-    // Most tool GIFs are short; 1.5s is a safe upper bound.
-    const t = setTimeout(() => setAnimationDone(true), 1500);
+    const t = setTimeout(() => setAnimationDone(true), 3000);
     return () => clearTimeout(t);
   }, [tool.id]);
+
+  // Hover replay
+  React.useEffect(() => {
+    if (isHovered) {
+      setHoverCount((c) => c + 1);
+      setAnimationDone(false);
+      const t = setTimeout(() => setAnimationDone(true), 3000);
+      return () => clearTimeout(t);
+    }
+  }, [isHovered]);
 
   return (
     <div
@@ -237,7 +268,7 @@ function ActiveToolLogo({ tool }) {
       }}
     >
       <img
-        key={`${tool.id}-png`}
+        key={`${tool.id}-png-${hoverCount}`}
         src={`/${tool.id}.png`}
         alt={tool.name}
         style={{
@@ -251,7 +282,7 @@ function ActiveToolLogo({ tool }) {
         }}
       />
       <img
-        key={`${tool.id}-gif`}
+        key={`${tool.id}-gif-${hoverCount}`}
         src={`/${tool.id}.gif`}
         alt={tool.name}
         style={{
@@ -271,6 +302,10 @@ function ActiveToolLogo({ tool }) {
 function SidebarItem({ tool, isActive, onSelect }) {
   const [isHovered, setIsHovered] = useState(false);
   const isAvailable = tool.component !== null;
+
+  // Activity indicator: The Forge shows a red dot when there are pending
+  // projects awaiting review (shared via localStorage with The Crucible).
+  const pendingCount = usePendingProjectCount(tool.id);
 
   return (
     <button
@@ -302,9 +337,33 @@ function SidebarItem({ tool, isActive, onSelect }) {
         borderLeft: isActive
           ? `3px solid ${COLOR.red}`
           : '3px solid transparent',
+        display: 'flex',
+        alignItems: 'center',
+        gap: '10px',
       }}
     >
-      {tool.name}
+      <span style={{ flex: 1 }}>{tool.name}</span>
+      {pendingCount > 0 && (
+        <span
+          title={`${pendingCount} pending`}
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            minWidth: '20px',
+            height: '20px',
+            padding: '0 6px',
+            borderRadius: '10px',
+            background: COLOR.red,
+            color: 'white',
+            fontSize: '11px',
+            fontWeight: '800',
+            letterSpacing: 0,
+          }}
+        >
+          {pendingCount}
+        </span>
+      )}
       {!isAvailable && (
         <span
           style={{
@@ -312,7 +371,6 @@ function SidebarItem({ tool, isActive, onSelect }) {
             fontWeight: '700',
             letterSpacing: '1px',
             color: 'rgba(255,255,255,0.4)',
-            marginLeft: '8px',
             textTransform: 'uppercase',
           }}
         >
@@ -321,6 +379,23 @@ function SidebarItem({ tool, isActive, onSelect }) {
       )}
     </button>
   );
+}
+
+// Reads pending-project count from localStorage on every render of the
+// sidebar. The Forge and Crucible both write to 'ignite-integration-projects';
+// this lets the sidebar surface "there's work waiting for you."
+function usePendingProjectCount(toolId) {
+  // Only The Forge has an activity indicator for pending projects.
+  // Easy to extend to other tools later if they get their own pending state.
+  if (toolId !== 'forge') return 0;
+  try {
+    const stored = localStorage.getItem('ignite-integration-projects');
+    if (!stored) return 0;
+    const projects = JSON.parse(stored);
+    return projects.filter((p) => p.status === 'pending').length;
+  } catch {
+    return 0;
+  }
 }
 
 function SidebarFooter() {
@@ -443,15 +518,27 @@ function WelcomePanel() {
         padding: '60px 40px',
       }}
     >
-      <div style={{ maxWidth: '480px', textAlign: 'center' }}>
+      <div style={{ maxWidth: '520px', textAlign: 'center' }}>
+        <div
+          style={{
+            fontSize: '12px',
+            fontWeight: '800',
+            color: COLOR.red,
+            letterSpacing: '3px',
+            textTransform: 'uppercase',
+            marginBottom: '14px',
+          }}
+        >
+          Welcome, Ignite Team
+        </div>
         <h1
           style={{
             margin: 0,
-            fontSize: '36px',
+            fontSize: '40px',
             fontWeight: '800',
             color: COLOR.charcoal,
             letterSpacing: '-1px',
-            lineHeight: 1.15,
+            lineHeight: 1.1,
           }}
         >
           Ignite Creative Services
@@ -461,7 +548,7 @@ function WelcomePanel() {
             width: '40px',
             height: '2px',
             background: COLOR.red,
-            margin: '20px auto 24px',
+            margin: '24px auto 24px',
             borderRadius: '2px',
           }}
         />
@@ -473,8 +560,8 @@ function WelcomePanel() {
             margin: 0,
           }}
         >
-          Welcome to the internal tools portal. Pick a tool from the sidebar to
-          get started.
+          Pick a tool from the sidebar to get started. Each tool is built to
+          accelerate a specific part of your workflow.
         </p>
       </div>
     </div>
