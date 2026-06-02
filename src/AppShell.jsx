@@ -1,12 +1,16 @@
 import React, { useState } from 'react';
 import Emberwatch from './Emberwatch';
+import IntegrationTracker from './IntegrationTracker';
+import LeadershipDashboard from './LeadershipDashboard';
+import ReportTransformer from './ReportTransformer';
+import TheBeacon from './TheBeacon';
 
 // ---------------------------------------------------------------------------
 // Tool registry
 // ---------------------------------------------------------------------------
 // Each tool entry: id, name, description, docsUrl (optional), and the
 // component to render. If `component` is null, the tool is marked Coming Soon
-// in the sidebar and the welcome panel is shown instead when selected.
+// in the sidebar and a placeholder is shown when selected.
 
 const TOOLS = [
   {
@@ -14,28 +18,28 @@ const TOOLS = [
     name: 'The Crucible',
     description: 'Create projects to be approved.',
     docsUrl: null,
-    component: null,
+    component: IntegrationTracker,
   },
   {
     id: 'forge',
     name: 'The Forge',
     description: 'Review and approve projects.',
     docsUrl: null,
-    component: null,
+    component: LeadershipDashboard,
   },
   {
     id: 'refinery',
     name: 'The Refinery',
     description: 'Transform Cereus reports to client-ready format.',
     docsUrl: null,
-    component: null,
+    component: ReportTransformer,
   },
   {
     id: 'beacon',
     name: 'The Beacon',
     description: 'Hunt for prospects and opportunities.',
     docsUrl: null,
-    component: null,
+    component: TheBeacon,
   },
   {
     id: 'emberwatch',
