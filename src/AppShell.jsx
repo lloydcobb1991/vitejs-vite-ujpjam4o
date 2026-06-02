@@ -177,6 +177,7 @@ function Sidebar({ activeId, activeTool, onSelect }) {
         background: COLOR.charcoal,
         display: 'flex',
         flexDirection: 'column',
+        objectFit: 'cover',
       }}
     >
       <LogoBlock activeTool={activeTool} />
@@ -215,7 +216,7 @@ function LogoBlock({ activeTool }) {
       onMouseLeave={() => setIsHovered(false)}
       style={{
         background: COLOR.red,
-        height: '180px',
+        height: '160px',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
