@@ -215,14 +215,12 @@ function LogoBlock({ activeTool }) {
       onMouseLeave={() => setIsHovered(false)}
       style={{
         background: COLOR.red,
-        height: '160px',
+        height: '180px',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
         position: 'relative',
         overflow: 'hidden',
-        // Soft outer shadow + thin dark hairline. Reads as a framed badge
-        // without bleeding into the white tool header next to it.
         boxShadow: '0 0 0 1px rgba(0,0,0,0.1), 0 4px 12px rgba(0,0,0,0.08), inset 0 -1px 0 rgba(0,0,0,0.2)',
       }}
     >
