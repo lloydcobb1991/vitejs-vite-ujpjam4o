@@ -48,7 +48,7 @@ export default function Dashboard({ onSelectTool }) {
     <div
       style={{
         minHeight: '100vh',
-        background: '#FFFFFF'
+        background: '#FFFFFF',
         padding: '60px 2%',
         fontFamily: '"Brandon Grotesque", "Helvetica Neue", Arial, sans-serif',
         position: 'relative',
