@@ -197,7 +197,7 @@ function LogoBlock({ activeTool }) {
       onMouseLeave={() => setIsHovered(false)}
       style={{
         background: COLOR.red,
-        height: '160px',
+        height: '168px',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
@@ -430,7 +430,7 @@ function SidebarFooter() {
           fontWeight: '600',
         }}
       >
-        Build (Beta) v0.2
+        Build (Beta) v0.8
       </div>
     </div>
   );
