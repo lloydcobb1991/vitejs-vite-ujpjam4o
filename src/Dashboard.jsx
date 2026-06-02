@@ -271,9 +271,7 @@ function ToolCard({ tool, onClick, delay }) {
           transition: 'opacity 0.2s ease, transform 0.2s ease',
         }}
       >
-        →
-      </div>
-        →
+        &rarr;
       </div>
     </div>
   );
