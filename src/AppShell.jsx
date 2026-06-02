@@ -121,8 +121,9 @@ export default function AppShell() {
             alt="Ignite CS"
             style={{
               position: 'absolute',
-              top: '20px',
-              right: '24px',
+            top: '50%',
+            transform: 'translateY(-50%)',
+              right: '20px',
               width: '80px',
               height: '80px',
               objectFit: 'contain',
