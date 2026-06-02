@@ -120,16 +120,15 @@ export default function AppShell() {
             src="/ignitecs-mark.png"
             alt="Ignite CS"
             style={{
-              position: 'absolute',
-            top: '50%',
-            transform: 'translateY(-50%)',
-              right: '20px',
-              width: '80px',
-              height: '80px',
-              objectFit: 'contain',
-              zIndex: 2,
-              opacity: 0.9,
-              pointerEvents: 'none',
+                position: 'absolute',
+            top: '48px',           t
+             right: '24px',
+              width: '84px',
+             height: '84px',
+    objectFit: 'contain',
+    zIndex: 2,
+    opacity: 1,
+    pointerEvents: 'none',
             }}
           />
 
