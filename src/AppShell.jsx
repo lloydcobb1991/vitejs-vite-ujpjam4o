@@ -557,7 +557,7 @@ function WelcomePanel() {
             lineHeight: 1.1,
           }}
         >
-          Ignite Creative Services<br>Tool Belt</br>
+          Ignite Creative Services<br>Tool Belt
         </h1>
         <div
           style={{
