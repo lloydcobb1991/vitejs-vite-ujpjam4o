@@ -48,7 +48,7 @@ export default function Dashboard({ onSelectTool }) {
     <div
       style={{
         minHeight: '100vh',
-        background: 'linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%)',
+        background: '#FFFFFF'
         padding: '60px 2%',
         fontFamily: '"Brandon Grotesque", "Helvetica Neue", Arial, sans-serif',
         position: 'relative',
