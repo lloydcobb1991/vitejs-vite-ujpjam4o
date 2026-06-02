@@ -111,9 +111,8 @@ export default function ReportTransformer() {
 
   return (
     <div style={{
-      minHeight: '100vh',
       background: '#f5f5f5',
-      padding: '40px 20px',
+      padding: '30px 20px',
       fontFamily: '"Brandon Grotesque", "Helvetica Neue", Arial, sans-serif'
     }}>
       <style>{`
@@ -125,40 +124,6 @@ export default function ReportTransformer() {
         width: '100%',
         margin: '0 auto'
       }}>
-        {/* Header */}
-        <div style={{
-          background: 'white',
-          borderRadius: '8px',
-          padding: '30px 40px',
-          marginBottom: '30px',
-          boxShadow: '0 2px 8px rgba(0, 0, 0, 0.08)',
-          borderTop: '4px solid #da291c'
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '8px' }}>
-            <Zap size={28} color="#da291c" fill="#da291c" />
-            <h1 style={{ 
-              margin: 0, 
-              fontSize: '28px', 
-              fontWeight: '700',
-              color: '#1a1a1a',
-              letterSpacing: '-0.5px'
-            }}>
-              Ignite Creative Services
-            </h1>
-          </div>
-          <h2 style={{ 
-            margin: '5px 0 0 0', 
-            fontSize: '20px',
-            fontWeight: '600',
-            color: '#da291c'
-          }}>
-            3PL Report Transformer
-          </h2>
-          <p style={{ margin: '5px 0 0 0', color: '#666', fontSize: '14px' }}>
-            Convert Cereus PSNA reports to client-ready format instantly
-          </p>
-        </div>
-
         {/* Upload Area */}
         {!transformedData && (
           <div style={{
@@ -166,8 +131,7 @@ export default function ReportTransformer() {
             borderRadius: '8px',
             padding: '60px 40px',
             textAlign: 'center',
-            boxShadow: '0 2px 8px rgba(0, 0, 0, 0.08)',
-            borderLeft: '4px solid #da291c'
+            boxShadow: '0 2px 8px rgba(0, 0, 0, 0.06)'
           }}>
             <div style={{
               display: 'inline-flex',
@@ -190,7 +154,7 @@ export default function ReportTransformer() {
               textTransform: 'uppercase',
               letterSpacing: '1px'
             }}>
-              Upload Cereus Report
+              Upload Spreadsheet
             </h2>
             <p style={{ 
               margin: '0 0 30px 0', 
@@ -198,7 +162,7 @@ export default function ReportTransformer() {
               fontSize: '15px',
               lineHeight: '1.6'
             }}>
-              Upload your PSNA/Cereus XLSX report file
+              Upload an XLSX file to clean and transform
             </p>
 
             <label style={{
@@ -254,15 +218,14 @@ export default function ReportTransformer() {
                 textTransform: 'uppercase',
                 letterSpacing: '1px'
               }}>
-                What This Tool Does
+                Currently Optimized For Cereus PSNA Reports
               </h3>
               <ul style={{
                 listStyle: 'none',
                 padding: 0,
-                margin: 0,
+                margin: '0 auto',
                 textAlign: 'left',
-                maxWidth: '500px',
-                margin: '0 auto'
+                maxWidth: '500px'
               }}>
                 <li style={{
                   padding: '10px 0',
@@ -273,7 +236,7 @@ export default function ReportTransformer() {
                   gap: '10px'
                 }}>
                   <CheckCircle size={18} color="#da291c" />
-                  Removes duplicate rows from Cereus exports
+                  Removes duplicate rows
                 </li>
                 <li style={{
                   padding: '10px 0',
@@ -319,8 +282,7 @@ export default function ReportTransformer() {
             background: 'white',
             borderRadius: '8px',
             padding: '30px',
-            boxShadow: '0 2px 8px rgba(0, 0, 0, 0.08)',
-            borderLeft: '4px solid #da291c'
+            boxShadow: '0 2px 8px rgba(0, 0, 0, 0.06)'
           }}>
             <div style={{
               display: 'flex',
