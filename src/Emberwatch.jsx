@@ -14,6 +14,7 @@ import {
   Save,
   Send,
 } from 'lucide-react';
+import * as XLSX from 'xlsx';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -159,12 +160,26 @@ export default function Emberwatch() {
     setAplError(null);
 
     try {
-      const text = await file.text();
-      const brands = parseAplCsv(text);
+      const ext = file.name.toLowerCase().split('.').pop();
+      let brands;
+
+      if (ext === 'xlsx' || ext === 'xls') {
+        // Parse Excel via SheetJS, then run the same column matching as CSV
+        const arrayBuffer = await file.arrayBuffer();
+        const workbook = XLSX.read(arrayBuffer, { type: 'array' });
+        const sheetName = workbook.SheetNames[0];
+        const worksheet = workbook.Sheets[sheetName];
+        const rows = XLSX.utils.sheet_to_json(worksheet, { header: 1 }); // array of arrays
+        brands = parseAplRows(rows);
+      } else {
+        // CSV path
+        const text = await file.text();
+        brands = parseAplCsv(text);
+      }
 
       if (brands.length === 0) {
         throw new Error(
-          'No brands found. Make sure the CSV has "Brand Name" and "Supplier" columns.'
+          'No brands found. Make sure the file has "Brand Name" and "Supplier" columns.'
         );
       }
 
@@ -547,9 +562,10 @@ function UploadView({
         <div
           style={{
             display: 'flex',
-            justifyContent: 'space-between',
+            flexDirection: 'column',
+            justifyContent: 'center',
             alignItems: 'center',
-            flexWrap: 'wrap',
+            textAlign: 'center',
             gap: '20px',
           }}
         >
@@ -589,11 +605,18 @@ function UploadView({
               {customApl ? 'Custom upload' : 'Using built-in list'}
             </div>
           </div>
-          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+          <div
+            style={{
+              display: 'flex',
+              gap: '10px',
+              flexWrap: 'wrap',
+              justifyContent: 'center',
+            }}
+          >
             <input
               ref={aplInputRef}
               type="file"
-              accept=".csv,text/csv"
+              accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
               onChange={onAplUpload}
               style={{ display: 'none' }}
             />
@@ -667,9 +690,10 @@ function UploadView({
             fontSize: '12px',
             color: '#999',
             lineHeight: '1.6',
+            textAlign: 'center',
           }}
         >
-          Upload a CSV with{' '}
+          Upload a CSV or Excel file with{' '}
           <strong style={{ color: '#666' }}>Brand Name</strong> and{' '}
           <strong style={{ color: '#666' }}>Supplier</strong> columns to use a
           client-specific list instead of the built-in.
@@ -800,9 +824,7 @@ function UploadView({
           disabled={analyzing || uploadedFiles.length === 0}
           style={{
             width: '100%',
-            background: analyzing
-              ? 'linear-gradient(135deg, #999 0%, #666 100%)'
-              : 'linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%)',
+            background: analyzing ? '#999' : '#da291c',
             color: 'white',
             border: 'none',
             padding: '28px',
@@ -819,7 +841,7 @@ function UploadView({
             alignItems: 'center',
             justifyContent: 'center',
             gap: '12px',
-            boxShadow: '0 8px 24px rgba(0,0,0,0.3)',
+            boxShadow: '0 4px 12px rgba(218, 41, 28, 0.25)',
           }}
         >
           {analyzing ? (
@@ -1877,9 +1899,53 @@ function EmailReportView({ results, onBack }) {
 }
 
 // ---------------------------------------------------------------------------
-// Parse an uploaded APL CSV into [{ name, supplier }]. Robust to common header
-// variations and quoted fields containing commas.
+// APL parsers. Two entry points (CSV text and SheetJS row arrays) share the
+// same header-matching logic so behavior is identical across file types.
 // ---------------------------------------------------------------------------
+
+// Common header variants we look for
+const BRAND_HEADERS = ['brand name', 'brand', 'name', 'product', 'product name'];
+const SUPPLIER_HEADERS = ['supplier', 'vendor', 'company', 'distributor'];
+
+// Locate brand + supplier column indexes from an array of header strings.
+function findAplColumns(headers) {
+  const lower = headers.map((h) => String(h || '').trim().toLowerCase());
+  const brandIdx = lower.findIndex((h) => BRAND_HEADERS.includes(h));
+  const supplierIdx = lower.findIndex((h) => SUPPLIER_HEADERS.includes(h));
+
+  if (brandIdx === -1) {
+    throw new Error(
+      'Could not find a brand column. Expected a header like "Brand Name", "Brand", or "Name".'
+    );
+  }
+  if (supplierIdx === -1) {
+    throw new Error(
+      'Could not find a supplier column. Expected a header like "Supplier" or "Vendor".'
+    );
+  }
+  return { brandIdx, supplierIdx };
+}
+
+// Parse a 2D array (typically from XLSX.utils.sheet_to_json with header:1)
+// into [{ name, supplier }].
+function parseAplRows(rows) {
+  if (!rows || rows.length < 2) {
+    throw new Error('Spreadsheet must have a header row and at least one data row.');
+  }
+
+  const { brandIdx, supplierIdx } = findAplColumns(rows[0]);
+  const brands = [];
+
+  for (let i = 1; i < rows.length; i++) {
+    const row = rows[i] || [];
+    const name = String(row[brandIdx] || '').trim();
+    const supplier = String(row[supplierIdx] || '').trim();
+    if (!name) continue;
+    brands.push({ name, supplier: supplier || 'UNKNOWN' });
+  }
+
+  return brands;
+}
 
 function parseAplCsv(text) {
   // Strip BOM and split into lines, dropping empty ones
@@ -1919,36 +1985,8 @@ function parseAplCsv(text) {
     return fields.map((f) => f.trim());
   };
 
-  // Find brand + supplier columns by checking common header variants.
-  const headers = parseLine(lines[0]).map((h) => h.toLowerCase());
-  const brandIdx = headers.findIndex((h) =>
-    ['brand name', 'brand', 'name', 'product', 'product name'].includes(h)
-  );
-  const supplierIdx = headers.findIndex((h) =>
-    ['supplier', 'vendor', 'company', 'distributor'].includes(h)
-  );
-
-  if (brandIdx === -1) {
-    throw new Error(
-      'Could not find a brand column. Expected a header like "Brand Name", "Brand", or "Name".'
-    );
-  }
-  if (supplierIdx === -1) {
-    throw new Error(
-      'Could not find a supplier column. Expected a header like "Supplier" or "Vendor".'
-    );
-  }
-
-  const brands = [];
-  for (let i = 1; i < lines.length; i++) {
-    const cols = parseLine(lines[i]);
-    const name = (cols[brandIdx] || '').trim();
-    const supplier = (cols[supplierIdx] || '').trim();
-    if (!name) continue;
-    brands.push({ name, supplier: supplier || 'UNKNOWN' });
-  }
-
-  return brands;
+  const rows = lines.map(parseLine);
+  return parseAplRows(rows);
 }
 
 // ---------------------------------------------------------------------------
