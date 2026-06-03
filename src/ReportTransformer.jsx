@@ -48,13 +48,15 @@ export default function ReportTransformer() {
         
         if (!cartMap.has(cartId)) {
           cartMap.set(cartId, {
-            cartNumber: cartId,
+            cartNumber: row['/Cart/Header/SessionID']?.toString().trim() || cartId,
             orderName: row['/Cart/Header/ContactInfo/Name']?.toString().trim() || '',
-            recipient: row['/Cart/Header/BillingInfo/Name']?.toString().trim() || '',
-            address: row['/Cart/Header/BillingInfo/Address']?.toString().trim() || '',
-            city: row['/Cart/Header/BillingInfo/City']?.toString().trim() || '',
-            state: row['/Cart/Header/BillingInfo/State']?.toString().trim() || '',
-            zip: row['/Cart/Header/BillingInfo/Zip']?.toString().trim() || '',
+            recipient: row['/Cart/Header/ShippingInfo/Name']?.toString().trim() || '',
+            // Cereus quirk: ShippingInfo/Address holds an email; the actual
+            // street address is in ShippingInfo/Address2.
+            address: row['/Cart/Header/ShippingInfo/Address2']?.toString().trim() || '',
+            city: row['/Cart/Header/ShippingInfo/City']?.toString().trim() || '',
+            state: row['/Cart/Header/ShippingInfo/State']?.toString().trim() || '',
+            zip: row['/Cart/Header/ShippingInfo/Zip']?.toString().trim() || '',
             notes: row['/Cart/Header/Notes']?.toString().trim() || '',
             lines: []
           });
