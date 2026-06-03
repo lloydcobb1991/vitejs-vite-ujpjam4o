@@ -296,9 +296,9 @@ export default function Emberwatch() {
 ${brandList}
 
 **TASK:**
-1. Scan the entire menu — every page, every section, every panel, every list. Cocktail recipes, spirits lists, mixers, soft drinks, by-the-glass sections, side panels, captions, sidebar boxes — every visible piece of text is in scope.
-2. For each APL brand from the list above, count every time it appears anywhere on the menu. Each appearance is 1 impression, whether it's in a cocktail recipe, a spirits list, a mixer list, a soft drink panel, or any other section.
-3. The same brand appearing in multiple places counts each time. If "Fever-Tree Ginger Beer" appears in 3 cocktail recipes AND in a mixer list, that's 4 impressions.
+1. Scan the entire menu — every page, every section, every panel, every list, every cocktail title, every image and its surrounding text. Cocktail recipes, spirits lists, mixers, soft drinks, by-the-glass sections, side panels, captions, sidebar boxes, cocktail photography — every visible piece of content is in scope.
+2. For each APL brand from the list above, count every time it appears anywhere on the menu. Each appearance is 1 impression, whether it's in a cocktail recipe, a spirits list, a cocktail title, image callout text, or a brand visible in an image.
+3. The same brand appearing in multiple places counts each time. If "Fever-Tree Ginger Beer" appears in 3 cocktail recipes AND in a mixer list, that's 4 impressions. If "Ketel One" appears in an espresso martini recipe AND on a visible bottle in the cocktail's image, that's 2 impressions for that single drink.
 4. Flag compliance issues only for genuinely problematic mentions (see below).
 
 **WHAT COUNTS AS AN APPEARANCE:**
@@ -306,7 +306,22 @@ ${brandList}
 - The brand name is listed in a spirits/cocktail/wine/beer inventory section
 - The brand name is listed in a mixers, soft drinks, or non-alcoholic panel
 - The brand name appears in any sidebar, callout box, featured-product section, or pricing list
+- **The brand name appears in a cocktail's name/title.** Example: "Ole Skrewball Old Fashioned" → 1 impression for "Skrewball Peanut Butter Whiskey" from the title (in addition to any impressions from the ingredient list).
+- **Text near or beside a cocktail image that names a brand.** Example: a featured-drink image with adjacent callout text "Made with Ketel One" → 1 impression. This is counted separately from any ingredient-list mention of the same brand for the same drink.
+- **A brand visible in an image** — on a bottle label, on branded glassware, on a garnish pick, or anywhere else the brand identity is visually present in the photograph. Example: an espresso martini photo with a recognizable Ketel One bottle in the shot → 1 impression. Be cautious here: only count brands you can identify with reasonable confidence from visual features (label text you can read, distinctive bottle shape, prominent logo).
 - Abbreviated forms count too (see "Matching Abbreviated Names" below)
+
+**Each surface is counted separately.** A single featured cocktail can produce multiple impressions for the same brand if the brand appears (1) in the recipe ingredients, (2) in callout text beside the image, AND (3) on a visible bottle in the image. Suppliers pay for surface visibility, not unique drinks.
+
+**TAG THE SOURCE OF EACH MENTION (this enables auditing):**
+In the "cocktails" array for each brand, tag the source so impressions can be traced back to the menu:
+- Recipe ingredient: no tag needed → "Espresso Martini"
+- Cocktail title mention: "Ole Skrewball Old Fashioned (title)"
+- Image callout text: "Espresso Martini (image text)"
+- Brand visible in image: "Espresso Martini (image)"
+- Spirits/mixer list: "Spirits List"
+
+If the same cocktail produces multiple impressions for one brand, list each source as a separate array entry. Example: `"cocktails": ["Espresso Martini", "Espresso Martini (image text)", "Espresso Martini (image)"]`
 
 **WHAT DOES NOT COUNT (rare but important):**
 - Brand mentioned in negative context: "we don't carry X," "X is unavailable," "alternative to X"
@@ -348,9 +363,9 @@ Reasonable abbreviations on a menu are normal and acceptable. Do NOT flag these 
 {
   "brand_impressions": {
     "Brand Name": {
-      "count": 3,
+      "count": 4,
       "supplier": "SUPPLIER",
-      "cocktails": ["Cocktail 1", "Cocktail 2", "Spirits List"]
+      "cocktails": ["Cocktail Name", "Cocktail Name (image text)", "Cocktail Name (image)", "Spirits List"]
     }
   },
   "compliance_issues": [
@@ -411,18 +426,29 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
 
   const aggregateBySupplier = (menuAnalyses) => {
     const supplierTotals = {};
+    // Map: supplier -> lowercased brand -> canonical display name (first seen)
+    // So "Absolut" and "ABSOLUT" both bucket into whichever appeared first.
+    const canonicalDisplayName = {};
 
     menuAnalyses.forEach((menu) => {
       Object.entries(menu.brand_impressions || {}).forEach(([brand, data]) => {
         const supplier = data.supplier || 'UNKNOWN';
+        const brandKey = brand.trim().toLowerCase();
 
         if (!supplierTotals[supplier]) {
           supplierTotals[supplier] = { total: 0, brands: {}, locations: {} };
+          canonicalDisplayName[supplier] = {};
         }
 
+        // Pick display name: first one we see for this normalized key
+        if (!canonicalDisplayName[supplier][brandKey]) {
+          canonicalDisplayName[supplier][brandKey] = brand.trim();
+        }
+        const displayName = canonicalDisplayName[supplier][brandKey];
+
         supplierTotals[supplier].total += data.count;
-        supplierTotals[supplier].brands[brand] =
-          (supplierTotals[supplier].brands[brand] || 0) + data.count;
+        supplierTotals[supplier].brands[displayName] =
+          (supplierTotals[supplier].brands[displayName] || 0) + data.count;
         supplierTotals[supplier].locations[menu.location] =
           (supplierTotals[supplier].locations[menu.location] || 0) + data.count;
       });
@@ -431,6 +457,19 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
     return Object.entries(supplierTotals)
       .map(([supplier, data]) => ({ supplier, ...data }))
       .sort((a, b) => b.total - a.total);
+  };
+
+  // Helper for per-menu lookup: find a brand's count in a menu's
+  // brand_impressions map, matching case-insensitively.
+  const findMenuBrandCount = (menu, brandName) => {
+    if (!menu || !menu.brand_impressions) return 0;
+    const target = brandName.trim().toLowerCase();
+    for (const [name, data] of Object.entries(menu.brand_impressions)) {
+      if (name.trim().toLowerCase() === target) {
+        return data.count || 0;
+      }
+    }
+    return 0;
   };
 
   const exportToCSV = () => {
@@ -442,15 +481,18 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
 
     results.aggregated.forEach((supplier) => {
       Object.entries(supplier.brands).forEach(([brand, totalCount]) => {
-        const nycCount =
-          results.menuAnalyses.find((m) => m.location === 'New York City')
-            ?.brand_impressions?.[brand]?.count || 0;
-        const lvCount =
-          results.menuAnalyses.find((m) => m.location === 'Las Vegas')
-            ?.brand_impressions?.[brand]?.count || 0;
-        const dcCount =
-          results.menuAnalyses.find((m) => m.location === 'Washington DC')
-            ?.brand_impressions?.[brand]?.count || 0;
+        const nycCount = findMenuBrandCount(
+          results.menuAnalyses.find((m) => m.location === 'New York City'),
+          brand
+        );
+        const lvCount = findMenuBrandCount(
+          results.menuAnalyses.find((m) => m.location === 'Las Vegas'),
+          brand
+        );
+        const dcCount = findMenuBrandCount(
+          results.menuAnalyses.find((m) => m.location === 'Washington DC'),
+          brand
+        );
 
         rows.push([
           supplier.supplier,
