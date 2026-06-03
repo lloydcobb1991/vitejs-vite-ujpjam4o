@@ -232,9 +232,25 @@ export default function Emberwatch() {
 ${brandList}
 
 **TASK:**
-1. Find every mention of an APL brand anywhere on the menu — in cocktail recipes, spirit lists, by-the-glass sections, food pairings, anywhere a brand name appears
-2. Count impressions: each separate mention = 1 impression, even if abbreviated
-3. Flag compliance issues only for genuinely problematic mentions (see "What is NOT a compliance issue" below)
+1. Scan the entire menu — every page, every section, every panel, every list. Cocktail recipes, spirits lists, mixers, soft drinks, by-the-glass sections, side panels, captions, sidebar boxes — every visible piece of text is in scope.
+2. For each APL brand from the list above, count every time it appears anywhere on the menu. Each appearance is 1 impression, whether it's in a cocktail recipe, a spirits list, a mixer list, a soft drink panel, or any other section.
+3. The same brand appearing in multiple places counts each time. If "Fever-Tree Ginger Beer" appears in 3 cocktail recipes AND in a mixer list, that's 4 impressions.
+4. Flag compliance issues only for genuinely problematic mentions (see below).
+
+**WHAT COUNTS AS AN APPEARANCE:**
+- The brand name is written in a cocktail recipe ingredient list
+- The brand name is listed in a spirits/cocktail/wine/beer inventory section
+- The brand name is listed in a mixers, soft drinks, or non-alcoholic panel
+- The brand name appears in any sidebar, callout box, featured-product section, or pricing list
+- Abbreviated forms count too (see "Matching Abbreviated Names" below)
+
+**WHAT DOES NOT COUNT (rare but important):**
+- Brand mentioned in negative context: "we don't carry X," "X is unavailable," "alternative to X"
+- Brand in copyright/legal footer or trademark disclaimer
+- Brand referenced as inspiration without being used: "inspired by X" without X being an actual ingredient
+- Brand in allergen warnings or compliance text that isn't a product listing
+
+When in doubt: if the brand name is on the menu as something the venue carries, lists, or uses — count it.
 
 **MATCHING ABBREVIATED NAMES (this is critical):**
 Menus often abbreviate brand names. When the abbreviation is unambiguous, count it as an impression of the full product. Examples from real menus:
