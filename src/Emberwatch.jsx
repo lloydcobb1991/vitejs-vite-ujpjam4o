@@ -321,7 +321,7 @@ In the "cocktails" array for each brand, tag the source so impressions can be tr
 - Brand visible in image: "Espresso Martini (image)"
 - Spirits/mixer list: "Spirits List"
 
-If the same cocktail produces multiple impressions for one brand, list each source as a separate array entry. Example: `"cocktails": ["Espresso Martini", "Espresso Martini (image text)", "Espresso Martini (image)"]`
+If the same cocktail produces multiple impressions for one brand, list each source as a separate array entry. Example: "cocktails": ["Espresso Martini", "Espresso Martini (image text)", "Espresso Martini (image)"]
 
 **WHAT DOES NOT COUNT (rare but important):**
 - Brand mentioned in negative context: "we don't carry X," "X is unavailable," "alternative to X"
