@@ -205,9 +205,6 @@ function Sidebar({ activeId, activeTool, onSelect }) {
     </aside>
   );
 }
-
-// The top-of-sidebar logo block. Red background. Shows the active tool's
-// PNG/GIF when a tool is selected; shows a small Ignite mark otherwise.
 function LogoBlock({ activeTool }) {
   const [isHovered, setIsHovered] = useState(false);
 
