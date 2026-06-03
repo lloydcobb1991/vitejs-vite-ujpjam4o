@@ -301,6 +301,18 @@ ${brandList}
 3. The same brand appearing in multiple places counts each time. If "Fever-Tree Ginger Beer" appears in 3 cocktail recipes AND in a mixer list, that's 4 impressions. If "Ketel One" appears in an espresso martini recipe AND on a visible bottle in the cocktail's image, that's 2 impressions for that single drink.
 4. Flag compliance issues only for genuinely problematic mentions (see below).
 
+**STRICT APL ENFORCEMENT (critical):**
+ONLY count brands that appear in the APL list above. Do not include any brand that is not explicitly in the APL, even if you recognize it as a well-known spirit/beer/wine brand.
+
+Examples of what NOT to do:
+- Menu mentions "Ole Smoky Salty Caramel Whiskey" but it's not in the APL → DO NOT include it in brand_impressions.
+- Menu mentions "Don Julio Reposado" but the APL only lists "Don Julio Blanco" and "Don Julio 1942" → DO NOT include "Don Julio Reposado" as a separate brand. (You may NOT count it against Don Julio Blanco either — it's a different SKU.)
+- Menu mentions "Fever Tree Tonic Water" but the APL only lists "Fever-Tree Ginger Beer" → DO NOT count Tonic Water mentions.
+
+Non-APL brands should be **silently ignored**. Do NOT flag them as compliance issues. Do NOT add them to brand_impressions. They are simply out of scope for this analysis.
+
+The exception: if a menu mention is an ABBREVIATION of an APL brand (per "Matching Abbreviated Names" below), it counts as a hit for that APL brand. E.g., "Ketel One Cucumber & Mint" on a menu is an abbreviation of "Ketel One Botanical Cucumber & Mint Vodka" in the APL — count it for the APL entry.
+
 **WHAT COUNTS AS AN APPEARANCE:**
 - The brand name is written in a cocktail recipe ingredient list
 - The brand name is listed in a spirits/cocktail/wine/beer inventory section
@@ -389,8 +401,18 @@ Examples:
 - APL list shows: "- Appleton Estate 12-year Rare Blend (Jamacian) (CAMPARI)" → JSON key: "Appleton Estate 12-year Rare Blend"
 - APL list shows: "- Zacapa 23 (Guatemala) (DIAGEO)" → JSON key: "Zacapa 23"
 - APL list shows: "- Don Q Cristal + (light spanish) (SERRALLES)" → JSON key: "Don Q Cristal"
+- APL list shows: "- Oban - 14 year old (Highland) (DIAGEO)" → JSON key: "Oban 14 year old" (strip "- " and "(Highland)")
+- APL list shows: "- Macallan Glenrothes - 18 year old (Speyside) (EDRINGTON)" → JSON key: "Macallan Glenrothes 18 year old"
 
 Always put the supplier in the separate "supplier" field, never in the brand name key. Always strip trailing region/origin descriptors. The brand name should be clean and consistent so identical brands across multiple menus aggregate correctly.
+
+**USE THE APL CANONICAL FORM AS THE KEY, NOT THE MENU'S WORDING.**
+Regardless of how the menu writes a brand, use the cleaned APL form as the JSON key. Examples:
+- Menu says "Oban 14yr" → APL has "Oban - 14 year old (Highland)" → JSON key: "Oban 14 year old"
+- Menu says "Maker's 46" → APL has "Maker's Mark 46 Bourbon" → JSON key: "Maker's Mark 46 Bourbon"
+- Menu says "Tito's" → APL has "Tito's Handmade" → JSON key: "Tito's Handmade"
+
+This ensures the same brand reported across multiple menus aggregates into one row, not multiple rows for different abbreviations.
 
 ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anywhere.`,
               },
