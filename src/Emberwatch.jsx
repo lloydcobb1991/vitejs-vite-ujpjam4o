@@ -135,13 +135,53 @@ export default function Emberwatch() {
   const [error, setError] = useState(null);
   const [progress, setProgress] = useState('');
   const [view, setView] = useState('upload'); // 'upload' | 'results' | 'email'
+  const [customApl, setCustomApl] = useState(null); // { name, brands } or null
+  const [aplError, setAplError] = useState(null);
   const fileInputRef = useRef(null);
+  const aplInputRef = useRef(null);
+
+  // Active APL: custom if uploaded, else built-in.
+  const activeApl = customApl || { name: 'Built-in APL', brands: APL_DATA.brands };
 
   const handleFileUpload = (e) => {
     const files = Array.from(e.target.files);
     setUploadedFiles(files);
     setResults(null);
     setError(null);
+  };
+
+  // ----- Custom APL upload -----
+
+  const handleAplUpload = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    setAplError(null);
+
+    try {
+      const text = await file.text();
+      const brands = parseAplCsv(text);
+
+      if (brands.length === 0) {
+        throw new Error(
+          'No brands found. Make sure the CSV has "Brand Name" and "Supplier" columns.'
+        );
+      }
+
+      setCustomApl({ name: file.name, brands });
+    } catch (err) {
+      console.error('APL parse error:', err);
+      setAplError(err.message || 'Could not read this APL file.');
+      setCustomApl(null);
+    }
+
+    // Reset the input so re-selecting the same file re-fires onChange
+    if (aplInputRef.current) aplInputRef.current.value = '';
+  };
+
+  const clearCustomApl = () => {
+    setCustomApl(null);
+    setAplError(null);
   };
 
   const analyzeMenus = async () => {
@@ -200,7 +240,7 @@ export default function Emberwatch() {
   };
 
   const analyzeMenuWithClaude = async ({ name, base64 }) => {
-    const brandList = APL_DATA.brands
+    const brandList = activeApl.brands
       .map((b) => `- ${b.name} (${b.supplier})`)
       .join('\n');
 
@@ -427,7 +467,14 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
           analyzing={analyzing}
           progress={progress}
           error={error}
+          activeApl={activeApl}
+          customApl={customApl}
+          aplError={aplError}
+          aplInputRef={aplInputRef}
           onPickFiles={() => fileInputRef.current?.click()}
+          onPickApl={() => aplInputRef.current?.click()}
+          onAplUpload={handleAplUpload}
+          onClearApl={clearCustomApl}
           onFileUpload={handleFileUpload}
           onDropFiles={(files) => {
             setUploadedFiles(files);
@@ -471,7 +518,14 @@ function UploadView({
   analyzing,
   progress,
   error,
+  activeApl,
+  customApl,
+  aplError,
+  aplInputRef,
   onPickFiles,
+  onPickApl,
+  onAplUpload,
+  onClearApl,
   onFileUpload,
   onDropFiles,
   onAnalyze,
@@ -479,6 +533,149 @@ function UploadView({
 }) {
   return (
     <div style={{ width: '98%', margin: '0 auto', padding: '0 20px' }}>
+      {/* APL selection panel */}
+      <div
+        style={{
+          background: 'white',
+          borderRadius: '16px',
+          padding: '24px 32px',
+          marginBottom: '24px',
+          boxShadow: '0 2px 8px rgba(0,0,0,0.06)',
+          border: customApl ? '2px solid #da291c' : '2px solid #ececec',
+        }}
+      >
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            flexWrap: 'wrap',
+            gap: '20px',
+          }}
+        >
+          <div>
+            <div
+              style={{
+                fontSize: '11px',
+                fontWeight: '800',
+                color: '#999',
+                letterSpacing: '2px',
+                textTransform: 'uppercase',
+                marginBottom: '6px',
+              }}
+            >
+              Active APL
+            </div>
+            <div
+              style={{
+                fontSize: '20px',
+                fontWeight: '800',
+                color: '#1a1a1a',
+                letterSpacing: '-0.3px',
+              }}
+            >
+              {activeApl.name}
+            </div>
+            <div
+              style={{
+                fontSize: '14px',
+                color: '#666',
+                marginTop: '4px',
+                fontWeight: '500',
+              }}
+            >
+              {activeApl.brands.length} brand
+              {activeApl.brands.length !== 1 ? 's' : ''} loaded ·{' '}
+              {customApl ? 'Custom upload' : 'Using built-in list'}
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+            <input
+              ref={aplInputRef}
+              type="file"
+              accept=".csv,text/csv"
+              onChange={onAplUpload}
+              style={{ display: 'none' }}
+            />
+            <button
+              onClick={onPickApl}
+              style={{
+                background: 'white',
+                color: '#da291c',
+                border: '2px solid #da291c',
+                padding: '12px 22px',
+                borderRadius: '8px',
+                fontSize: '13px',
+                fontWeight: '800',
+                cursor: 'pointer',
+                textTransform: 'uppercase',
+                letterSpacing: '1px',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '8px',
+              }}
+            >
+              <Upload size={16} />
+              {customApl ? 'Replace APL' : 'Upload Custom APL'}
+            </button>
+            {customApl && (
+              <button
+                onClick={onClearApl}
+                style={{
+                  background: 'transparent',
+                  color: '#666',
+                  border: '2px solid #ddd',
+                  padding: '12px 22px',
+                  borderRadius: '8px',
+                  fontSize: '13px',
+                  fontWeight: '800',
+                  cursor: 'pointer',
+                  textTransform: 'uppercase',
+                  letterSpacing: '1px',
+                }}
+              >
+                Use Built-in
+              </button>
+            )}
+          </div>
+        </div>
+
+        {aplError && (
+          <div
+            style={{
+              marginTop: '16px',
+              padding: '12px 16px',
+              background: '#fff5f5',
+              border: '1px solid #da291c',
+              borderRadius: '8px',
+              color: '#da291c',
+              fontSize: '14px',
+              fontWeight: '600',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '10px',
+            }}
+          >
+            <AlertTriangle size={18} />
+            {aplError}
+          </div>
+        )}
+
+        <div
+          style={{
+            marginTop: '14px',
+            fontSize: '12px',
+            color: '#999',
+            lineHeight: '1.6',
+          }}
+        >
+          Upload a CSV with{' '}
+          <strong style={{ color: '#666' }}>Brand Name</strong> and{' '}
+          <strong style={{ color: '#666' }}>Supplier</strong> columns to use a
+          client-specific list instead of the built-in.
+        </div>
+      </div>
+
       <div
         style={{
           background: 'white',
@@ -1677,6 +1874,81 @@ function EmailReportView({ results, onBack }) {
       </div>
     </div>
   );
+}
+
+// ---------------------------------------------------------------------------
+// Parse an uploaded APL CSV into [{ name, supplier }]. Robust to common header
+// variations and quoted fields containing commas.
+// ---------------------------------------------------------------------------
+
+function parseAplCsv(text) {
+  // Strip BOM and split into lines, dropping empty ones
+  const cleaned = text.replace(/^\uFEFF/, '');
+  const lines = cleaned
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+
+  if (lines.length < 2) {
+    throw new Error('CSV must have a header row and at least one data row.');
+  }
+
+  // Parse a single CSV line, handling quoted fields with internal commas.
+  const parseLine = (line) => {
+    const fields = [];
+    let current = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (c === '"') {
+        // Doubled quote inside a quoted field = literal quote
+        if (inQuotes && line[i + 1] === '"') {
+          current += '"';
+          i++;
+        } else {
+          inQuotes = !inQuotes;
+        }
+      } else if (c === ',' && !inQuotes) {
+        fields.push(current);
+        current = '';
+      } else {
+        current += c;
+      }
+    }
+    fields.push(current);
+    return fields.map((f) => f.trim());
+  };
+
+  // Find brand + supplier columns by checking common header variants.
+  const headers = parseLine(lines[0]).map((h) => h.toLowerCase());
+  const brandIdx = headers.findIndex((h) =>
+    ['brand name', 'brand', 'name', 'product', 'product name'].includes(h)
+  );
+  const supplierIdx = headers.findIndex((h) =>
+    ['supplier', 'vendor', 'company', 'distributor'].includes(h)
+  );
+
+  if (brandIdx === -1) {
+    throw new Error(
+      'Could not find a brand column. Expected a header like "Brand Name", "Brand", or "Name".'
+    );
+  }
+  if (supplierIdx === -1) {
+    throw new Error(
+      'Could not find a supplier column. Expected a header like "Supplier" or "Vendor".'
+    );
+  }
+
+  const brands = [];
+  for (let i = 1; i < lines.length; i++) {
+    const cols = parseLine(lines[i]);
+    const name = (cols[brandIdx] || '').trim();
+    const supplier = (cols[supplierIdx] || '').trim();
+    if (!name) continue;
+    brands.push({ name, supplier: supplier || 'UNKNOWN' });
+  }
+
+  return brands;
 }
 
 // ---------------------------------------------------------------------------
