@@ -164,13 +164,22 @@ export default function Emberwatch() {
       let brands;
 
       if (ext === 'xlsx' || ext === 'xls') {
-        // Parse Excel via SheetJS, then run the same column matching as CSV
+        // Parse Excel via SheetJS. Try a flat parse on sheet 1 first (handles
+        // simple "Brand Name | Supplier" spreadsheets). If that fails, fall
+        // back to the structured parser that walks multi-block layouts across
+        // every sheet.
         const arrayBuffer = await file.arrayBuffer();
         const workbook = XLSX.read(arrayBuffer, { type: 'array' });
-        const sheetName = workbook.SheetNames[0];
-        const worksheet = workbook.Sheets[sheetName];
-        const rows = XLSX.utils.sheet_to_json(worksheet, { header: 1 }); // array of arrays
-        brands = parseAplRows(rows);
+
+        try {
+          const sheetName = workbook.SheetNames[0];
+          const worksheet = workbook.Sheets[sheetName];
+          const rows = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+          brands = parseAplRows(rows);
+        } catch (flatErr) {
+          // Flat parse couldn't find headers — try structured parsing
+          brands = parseStructuredXlsxApl(workbook);
+        }
       } else {
         // CSV path
         const text = await file.text();
@@ -179,7 +188,7 @@ export default function Emberwatch() {
 
       if (brands.length === 0) {
         throw new Error(
-          'No brands found. Make sure the file has "Brand Name" and "Supplier" columns.'
+          'No brands found. Make sure the file has "Brand Name" and "Supplier" columns, or a SUPPLIER header next to each category.'
         );
       }
 
@@ -1987,6 +1996,135 @@ function parseAplCsv(text) {
 
   const rows = lines.map(parseLine);
   return parseAplRows(rows);
+}
+
+// ---------------------------------------------------------------------------
+// Parse a structured APL workbook (multiple sheets, side-by-side category
+// blocks, "SUPPLIER" column headers). Used as a fallback when the flat parser
+// can't find a single "Brand Name" / "Supplier" header row — i.e., for the
+// real-world client APL format we see in production.
+//
+// Algorithm:
+//   1. For each sheet, find every column that contains a "SUPPLIER" header
+//      cell somewhere. These are the supplier columns.
+//   2. Each supplier column owns a column zone: from (previous supplier + 1)
+//      through itself. So a sheet with suppliers in cols B, E, H has zones
+//      A-B, C-E, F-H.
+//   3. For each zone, identify the brand column by voting: in every row that
+//      contains a SUPPLIER header in that zone's supplier column, find the
+//      leftmost non-empty cell in the zone. The column with the most votes
+//      wins (ties broken leftward).
+//   4. Walk every data row in the sheet. Skip rows that are SUPPLIER-header
+//      rows themselves. For each row, pair the brand cell with the supplier
+//      cell. Skip rows where either is empty or looks like a category header.
+// ---------------------------------------------------------------------------
+
+function parseStructuredXlsxApl(workbook) {
+  const brands = [];
+  const seen = new Set();
+
+  // Heuristic: a brand string that looks like a category header
+  // (e.g., "RUM - 10", "TEQUILA - 17 (order silver - extra anejo)")
+  const looksLikeCategoryHeader = (s) => {
+    if (/^[A-Z/\s\-]+ - \d+/.test(s)) return true;
+    if (/.+- \d+\s*\(.+\)?\s*$/.test(s)) return true;
+    return false;
+  };
+
+  for (const sheetName of workbook.SheetNames) {
+    const sheet = workbook.Sheets[sheetName];
+    if (!sheet || !sheet['!ref']) continue;
+
+    const range = XLSX.utils.decode_range(sheet['!ref']);
+    const maxRow = range.e.r;
+    const maxCol = range.e.c;
+
+    // Helper: read a cell's string value (0-indexed row + col)
+    const cellAt = (r, c) => {
+      const addr = XLSX.utils.encode_cell({ r, c });
+      const cell = sheet[addr];
+      if (!cell || cell.v === undefined || cell.v === null) return '';
+      return String(cell.v).trim();
+    };
+
+    // Step 1: find all unique SUPPLIER columns
+    const supplierCols = new Set();
+    for (let r = 0; r <= maxRow; r++) {
+      for (let c = 0; c <= maxCol; c++) {
+        if (cellAt(r, c).toUpperCase() === 'SUPPLIER') {
+          supplierCols.add(c);
+        }
+      }
+    }
+    if (supplierCols.size === 0) continue;
+    const sortedSupCols = Array.from(supplierCols).sort((a, b) => a - b);
+
+    // Step 2: build column zones
+    const zones = [];
+    let prev = -1;
+    for (const sc of sortedSupCols) {
+      zones.push({ start: prev + 1, end: sc, supplierCol: sc });
+      prev = sc;
+    }
+
+    // Step 3: for each zone, vote on the brand column
+    for (const zone of zones) {
+      const votes = {};
+      const headerRows = [];
+      for (let r = 0; r <= maxRow; r++) {
+        if (cellAt(r, zone.supplierCol).toUpperCase() === 'SUPPLIER') {
+          headerRows.push(r);
+          for (let c = zone.start; c < zone.end; c++) {
+            if (cellAt(r, c)) {
+              votes[c] = (votes[c] || 0) + 1;
+              break;
+            }
+          }
+        }
+      }
+      if (Object.keys(votes).length === 0) continue;
+      // Most votes wins; ties broken leftmost
+      const brandCol = Object.entries(votes)
+        .map(([k, v]) => [Number(k), v])
+        .sort((a, b) => b[1] - a[1] || a[0] - b[0])[0][0];
+      zone.brandCol = brandCol;
+      zone.headerRows = new Set(headerRows);
+    }
+
+    // Step 4: walk data rows for each zone
+    for (const zone of zones) {
+      if (zone.brandCol === undefined) continue;
+      for (let r = 0; r <= maxRow; r++) {
+        if (zone.headerRows.has(r)) continue;
+        const brandRaw = cellAt(r, zone.brandCol);
+        const supplierRaw = cellAt(r, zone.supplierCol);
+        if (!brandRaw || !supplierRaw) continue;
+        if (supplierRaw.toUpperCase() === 'SUPPLIER') continue;
+
+        // Skip junk
+        if (brandRaw.toUpperCase().startsWith('LOCATIONS')) continue;
+        if (brandRaw.startsWith('*')) continue;
+        if (looksLikeCategoryHeader(brandRaw)) continue;
+
+        // Skip suppliers that are clearly punctuation/junk
+        if (supplierRaw.length < 2) continue;
+
+        const key = `${brandRaw.toLowerCase()}|${supplierRaw.toLowerCase()}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        brands.push({ name: brandRaw, supplier: supplierRaw });
+      }
+    }
+  }
+
+  if (brands.length === 0) {
+    throw new Error(
+      'Could not extract brands from this spreadsheet. Looking for either a flat "Brand Name | Supplier" header row, or category blocks with "SUPPLIER" column headers.'
+    );
+  }
+
+  return brands;
 }
 
 // ---------------------------------------------------------------------------
