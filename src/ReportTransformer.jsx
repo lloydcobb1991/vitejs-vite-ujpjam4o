@@ -37,14 +37,15 @@ export default function ReportTransformer() {
       console.log('Parsed rows:', jsonData.length);
       console.log('Sample row keys:', Object.keys(jsonData[0]));
       
-      // Process data - deduplicate by cart ID
+      // Process data: group rows by cart ID, keeping all line items per cart.
+      // Each cart's header fields (recipient/address/notes) are taken from the
+      // first row we encounter for that cart; line items accumulate.
       const cartMap = new Map();
       
       for (const row of jsonData) {
         const cartId = row['/Cart/#id']?.toString().trim();
         if (!cartId) continue;
         
-        // Only keep the first occurrence of each cart ID
         if (!cartMap.has(cartId)) {
           cartMap.set(cartId, {
             cartNumber: cartId,
@@ -54,14 +55,27 @@ export default function ReportTransformer() {
             city: row['/Cart/Header/BillingInfo/City']?.toString().trim() || '',
             state: row['/Cart/Header/BillingInfo/State']?.toString().trim() || '',
             zip: row['/Cart/Header/BillingInfo/Zip']?.toString().trim() || '',
-            notes: row['/Cart/Header/Notes']?.toString().trim() || ''
+            notes: row['/Cart/Header/Notes']?.toString().trim() || '',
+            lines: []
+          });
+        }
+        
+        // Add this row as a line item if it has a product name
+        const productName = row['/Cart/Item/ProductName']?.toString().trim();
+        if (productName) {
+          const qty = row['/Cart/Item/Qty'];
+          cartMap.get(cartId).lines.push({
+            product: productName,
+            qty: qty !== undefined && qty !== null ? qty.toString() : ''
           });
         }
       }
       
       const transformed = Array.from(cartMap.values());
       
-      console.log('Unique orders found:', transformed.length);
+      // Compute totals for diagnostics
+      const totalLines = transformed.reduce((sum, c) => sum + c.lines.length, 0);
+      console.log('Unique carts found:', transformed.length, '— total line items:', totalLines);
       
       if (transformed.length === 0) {
         throw new Error('No orders found in file. Please check the file format.');
@@ -79,24 +93,37 @@ export default function ReportTransformer() {
   const downloadTransformed = () => {
     if (!transformedData) return;
 
-    // Create CSV content with proper Proximo format
+    // CSV format matches the Proximo Webstore Sales Report:
+    // - One row per line item
+    // - Cart Number, address fields, and Notes appear ONLY on the first row
+    //   of each cart; subsequent line-item rows leave those columns blank
+    // - Carts with no line items still get one row (with blank Product/Qty)
     const headers = ['Cart Number', 'Order Name', 'Recipient', 'Address', 'City', 'State', 'Zip', 'Product Name', 'Quantity', 'NOTES'];
     const csvRows = [headers.join(',')];
     
-    transformedData.forEach(order => {
-      const row = [
-        order.cartNumber,
-        `"${order.orderName.replace(/"/g, '""')}"`,
-        `"${order.recipient.replace(/"/g, '""')}"`,
-        `"${order.address.replace(/"/g, '""')}"`,
-        `"${order.city.replace(/"/g, '""')}"`,
-        order.state,
-        order.zip,
-        '', // Product Name - empty for now
-        '', // Quantity - empty for now
-        `"${order.notes.replace(/"/g, '""')}"`
-      ];
-      csvRows.push(row.join(','));
+    // Escape a value for CSV: wrap in quotes, double internal quotes
+    const esc = (val) => `"${String(val ?? '').replace(/"/g, '""')}"`;
+    
+    transformedData.forEach(cart => {
+      // If a cart has no line items, emit a single row with blank product/qty
+      const lines = cart.lines.length > 0 ? cart.lines : [{ product: '', qty: '' }];
+      
+      lines.forEach((line, idx) => {
+        const isFirst = idx === 0;
+        const row = [
+          isFirst ? cart.cartNumber : '',
+          isFirst ? esc(cart.orderName) : '',
+          isFirst ? esc(cart.recipient) : '',
+          isFirst ? esc(cart.address) : '',
+          isFirst ? esc(cart.city) : '',
+          isFirst ? cart.state : '',
+          isFirst ? cart.zip : '',
+          esc(line.product),
+          line.qty,
+          isFirst ? esc(cart.notes) : ''
+        ];
+        csvRows.push(row.join(','));
+      });
     });
 
     const csvContent = csvRows.join('\n');
@@ -387,6 +414,7 @@ export default function ReportTransformer() {
                       <th style={{ padding: '12px', textAlign: 'left', borderBottom: '2px solid #da291c', fontWeight: '700', color: '#1a1a1a', fontSize: '12px', textTransform: 'uppercase', letterSpacing: '1px' }}>Recipient</th>
                       <th style={{ padding: '12px', textAlign: 'left', borderBottom: '2px solid #da291c', fontWeight: '700', color: '#1a1a1a', fontSize: '12px', textTransform: 'uppercase', letterSpacing: '1px' }}>City</th>
                       <th style={{ padding: '12px', textAlign: 'left', borderBottom: '2px solid #da291c', fontWeight: '700', color: '#1a1a1a', fontSize: '12px', textTransform: 'uppercase', letterSpacing: '1px' }}>State</th>
+                      <th style={{ padding: '12px', textAlign: 'center', borderBottom: '2px solid #da291c', fontWeight: '700', color: '#1a1a1a', fontSize: '12px', textTransform: 'uppercase', letterSpacing: '1px' }}>Items</th>
                       <th style={{ padding: '12px', textAlign: 'left', borderBottom: '2px solid #da291c', fontWeight: '700', color: '#1a1a1a', fontSize: '12px', textTransform: 'uppercase', letterSpacing: '1px' }}>Notes</th>
                     </tr>
                   </thead>
@@ -398,6 +426,7 @@ export default function ReportTransformer() {
                         <td style={{ padding: '12px', borderBottom: '1px solid #e8e8e8', color: '#1a1a1a' }}>{order.recipient}</td>
                         <td style={{ padding: '12px', borderBottom: '1px solid #e8e8e8', color: '#1a1a1a' }}>{order.city}</td>
                         <td style={{ padding: '12px', borderBottom: '1px solid #e8e8e8', color: '#1a1a1a' }}>{order.state}</td>
+                        <td style={{ padding: '12px', borderBottom: '1px solid #e8e8e8', color: '#1a1a1a', textAlign: 'center', fontWeight: '600' }}>{order.lines?.length || 0}</td>
                         <td style={{ padding: '12px', borderBottom: '1px solid #e8e8e8', color: '#666', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{order.notes}</td>
                       </tr>
                     ))}
@@ -454,10 +483,10 @@ export default function ReportTransformer() {
                 color: 'white'
               }}>
                 <div style={{ fontSize: '32px', fontWeight: '700', marginBottom: '5px' }}>
-                  {transformedData.filter(o => o.notes).length}
+                  {transformedData.reduce((sum, o) => sum + (o.lines?.length || 0), 0)}
                 </div>
                 <div style={{ fontSize: '12px', opacity: 0.9, textTransform: 'uppercase', letterSpacing: '1px', fontWeight: '700' }}>
-                  With Notes
+                  Line Items
                 </div>
               </div>
             </div>
