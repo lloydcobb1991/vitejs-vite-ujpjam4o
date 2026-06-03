@@ -232,9 +232,36 @@ export default function Emberwatch() {
 ${brandList}
 
 **TASK:**
-1. Find every cocktail and identify which APL brands appear in it
-2. Count impressions (each mention of a brand = 1 impression)
-3. Flag compliance issues (incomplete names like "Jack" instead of "Jack Daniel's Tennessee Whiskey", misspellings, or wrong product variants)
+1. Find every mention of an APL brand anywhere on the menu — in cocktail recipes, spirit lists, by-the-glass sections, food pairings, anywhere a brand name appears
+2. Count impressions: each separate mention = 1 impression, even if abbreviated
+3. Flag compliance issues only for genuinely problematic mentions (see "What is NOT a compliance issue" below)
+
+**MATCHING ABBREVIATED NAMES (this is critical):**
+Menus often abbreviate brand names. When the abbreviation is unambiguous, count it as an impression of the full product. Examples from real menus:
+- "Ketel One Cucumber & Mint" → counts as "Ketel One Botanical Cucumber & Mint Vodka"
+- "Tito's" or "Tito's Handmade" → counts as "Tito's Handmade"
+- "Maker's Mark" or "Maker's 46" → counts as "Maker's Mark 46 Bourbon"
+- "Angel's Envy" → counts as "Angel's Envy Bourbon"
+- "Espolón Blanco" or "Espolòn Blanco" (with or without accent) → counts as "Espolón Blanco Tequila"
+- "BACARDÍ Superior" or "Bacardi" → counts as "BACARDÍ Superior"
+- "Jack Daniel's" → counts as "Jack Daniel's Tennessee Whiskey"
+- "Tanqueray" → counts as "Tanqueray London Dry Gin"
+- "Bulleit" → counts as "Bulleit Bourbon"
+- "Crown Royal" → counts as "Crown Royal Canadian Whisky"
+
+If an abbreviation could refer to multiple APL products (e.g., "Don Julio" could be Blanco or Reposado), use surrounding context. If still ambiguous, count it under the most basic/common variant and note it under compliance.
+
+**WHAT IS NOT A COMPLIANCE ISSUE:**
+Reasonable abbreviations on a menu are normal and acceptable. Do NOT flag these as compliance issues:
+- "Ketel One Cucumber & Mint" (clearly the Botanical product)
+- "Tito's" (clearly Tito's Handmade)
+- "Maker's Mark 46" (just shorthand for the full name)
+- Any abbreviation listed in the matching examples above
+
+**WHAT IS a compliance issue:**
+- Just "Jack" or "Jim" or "Crown" (too generic to identify the product)
+- Misspellings of brand names ("Bacardy" instead of "Bacardi")
+- Wrong product variants (e.g., menu says "Don Julio Blanco" but the recipe makes more sense with Reposado — flag for review)
 
 **RETURN ONLY THIS JSON STRUCTURE - no other fields, no recipe text, no cocktail list:**
 \`\`\`json
@@ -243,7 +270,7 @@ ${brandList}
     "Brand Name": {
       "count": 3,
       "supplier": "SUPPLIER",
-      "cocktails": ["Cocktail 1", "Cocktail 2"]
+      "cocktails": ["Cocktail 1", "Cocktail 2", "Spirits List"]
     }
   },
   "compliance_issues": [
@@ -256,6 +283,8 @@ ${brandList}
   ]
 }
 \`\`\`
+
+For spirits list mentions, use "Spirits List" as the cocktail name. The "Brand Name" key MUST match the exact APL brand name from the list above.
 
 ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anywhere.`,
               },
@@ -558,7 +587,9 @@ function UploadView({
           disabled={analyzing || uploadedFiles.length === 0}
           style={{
             width: '100%',
-          background: analyzing ? '#999' : '#da291c',
+            background: analyzing
+              ? 'linear-gradient(135deg, #999 0%, #666 100%)'
+              : 'linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%)',
             color: 'white',
             border: 'none',
             padding: '28px',
@@ -575,7 +606,7 @@ function UploadView({
             alignItems: 'center',
             justifyContent: 'center',
             gap: '12px',
-            boxShadow: '0 4px 12px rgba(218, 41, 28, 0.25)',
+            boxShadow: '0 8px 24px rgba(0,0,0,0.3)',
           }}
         >
           {analyzing ? (
