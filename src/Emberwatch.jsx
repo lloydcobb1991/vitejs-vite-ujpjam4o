@@ -364,7 +364,18 @@ Reasonable abbreviations on a menu are normal and acceptable. Do NOT flag these 
 }
 \`\`\`
 
-For spirits list mentions, use "Spirits List" as the cocktail name. The "Brand Name" key MUST match the exact APL brand name from the list above.
+For spirits list mentions, use "Spirits List" as the cocktail name.
+
+**CRITICAL — BRAND NAME FORMATTING IN JSON KEYS:**
+The "Brand Name" key in your JSON response MUST be just the brand name. Do NOT include the supplier in parentheses. Do NOT include region/origin descriptors that appear after the brand name in the APL list.
+
+Examples:
+- APL list shows: "- Ketel One (DIAGEO)" → JSON key: "Ketel One"
+- APL list shows: "- Appleton Estate 12-year Rare Blend (Jamacian) (CAMPARI)" → JSON key: "Appleton Estate 12-year Rare Blend"
+- APL list shows: "- Zacapa 23 (Guatemala) (DIAGEO)" → JSON key: "Zacapa 23"
+- APL list shows: "- Don Q Cristal + (light spanish) (SERRALLES)" → JSON key: "Don Q Cristal"
+
+Always put the supplier in the separate "supplier" field, never in the brand name key. Always strip trailing region/origin descriptors. The brand name should be clean and consistent so identical brands across multiple menus aggregate correctly.
 
 ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anywhere.`,
               },
