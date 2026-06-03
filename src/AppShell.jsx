@@ -50,7 +50,6 @@ const TOOLS = [
   },
 ];
 
-// Shared color tokens so we never drift between values.
 const COLOR = {
   red: '#da291c',
   redHover: '#b8221a',
@@ -125,7 +124,7 @@ export default function AppShell() {
              right: '24px',
               width: '84px',
              height: '84px',
-    objectFit: 'contain',
+    objectFit: 'cover',
     zIndex: 2,
     opacity: 1,
     pointerEvents: 'none',
