@@ -14,6 +14,7 @@ import {
   Save,
   Send,
 } from 'lucide-react';
+import * as XLSX from 'xlsx';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -135,13 +136,76 @@ export default function Emberwatch() {
   const [error, setError] = useState(null);
   const [progress, setProgress] = useState('');
   const [view, setView] = useState('upload'); // 'upload' | 'results' | 'email'
+  const [customApl, setCustomApl] = useState(null); // { name, brands } or null
+  const [aplError, setAplError] = useState(null);
   const fileInputRef = useRef(null);
+  const aplInputRef = useRef(null);
+
+  // Active APL: custom if uploaded, else built-in.
+  const activeApl = customApl || { name: 'Built-in APL', brands: APL_DATA.brands };
 
   const handleFileUpload = (e) => {
     const files = Array.from(e.target.files);
     setUploadedFiles(files);
     setResults(null);
     setError(null);
+  };
+
+  // ----- Custom APL upload -----
+
+  const handleAplUpload = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    setAplError(null);
+
+    try {
+      const ext = file.name.toLowerCase().split('.').pop();
+      let brands;
+
+      if (ext === 'xlsx' || ext === 'xls') {
+        // Parse Excel via SheetJS. Try a flat parse on sheet 1 first (handles
+        // simple "Brand Name | Supplier" spreadsheets). If that fails, fall
+        // back to the structured parser that walks multi-block layouts across
+        // every sheet.
+        const arrayBuffer = await file.arrayBuffer();
+        const workbook = XLSX.read(arrayBuffer, { type: 'array' });
+
+        try {
+          const sheetName = workbook.SheetNames[0];
+          const worksheet = workbook.Sheets[sheetName];
+          const rows = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+          brands = parseAplRows(rows);
+        } catch (flatErr) {
+          // Flat parse couldn't find headers — try structured parsing
+          brands = parseStructuredXlsxApl(workbook);
+        }
+      } else {
+        // CSV path
+        const text = await file.text();
+        brands = parseAplCsv(text);
+      }
+
+      if (brands.length === 0) {
+        throw new Error(
+          'No brands found. Make sure the file has "Brand Name" and "Supplier" columns, or a SUPPLIER header next to each category.'
+        );
+      }
+
+      setCustomApl({ name: file.name, brands });
+    } catch (err) {
+      console.error('APL parse error:', err);
+      setAplError(err.message || 'Could not read this APL file.');
+      setCustomApl(null);
+    }
+
+    // Reset the input so re-selecting the same file re-fires onChange
+    if (aplInputRef.current) aplInputRef.current.value = '';
+  };
+
+  const clearCustomApl = () => {
+    setCustomApl(null);
+    setAplError(null);
   };
 
   const analyzeMenus = async () => {
@@ -200,7 +264,7 @@ export default function Emberwatch() {
   };
 
   const analyzeMenuWithClaude = async ({ name, base64 }) => {
-    const brandList = APL_DATA.brands
+    const brandList = activeApl.brands
       .map((b) => `- ${b.name} (${b.supplier})`)
       .join('\n');
 
@@ -211,7 +275,7 @@ export default function Emberwatch() {
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',
-        max_tokens: 8000,
+        max_tokens: 16000,
         messages: [
           {
             role: 'user',
@@ -232,18 +296,103 @@ export default function Emberwatch() {
 ${brandList}
 
 **TASK:**
-1. Find every cocktail and identify which APL brands appear in it
-2. Count impressions (each mention of a brand = 1 impression)
-3. Flag compliance issues (incomplete names like "Jack" instead of "Jack Daniel's Tennessee Whiskey", misspellings, or wrong product variants)
+1. Scan the entire menu — every page, every section, every panel, every list, every cocktail title, every image and its surrounding text. Cocktail recipes, spirits lists, mixers, soft drinks, by-the-glass sections, side panels, captions, sidebar boxes, cocktail photography — every visible piece of content is in scope.
+2. For each APL brand from the list above, count every time it appears anywhere on the menu. Each appearance is 1 impression, whether it's in a cocktail recipe, a spirits list, a cocktail title, image callout text, or a brand visible in an image.
+3. The same brand appearing in multiple places counts each time. If "Fever-Tree Ginger Beer" appears in 3 cocktail recipes AND in a mixer list, that's 4 impressions. If "Ketel One" appears in an espresso martini recipe AND on a visible bottle in the cocktail's image, that's 2 impressions for that single drink.
+4. Flag compliance issues only for genuinely problematic mentions (see below).
+
+**STRICT APL ENFORCEMENT (critical):**
+ONLY count brands that appear in the APL list above. Do not include any brand that is not explicitly in the APL, even if you recognize it as a well-known spirit/beer/wine brand.
+
+Examples of what NOT to do:
+- Menu mentions "Ole Smoky Salty Caramel Whiskey" but it's not in the APL → DO NOT include it in brand_impressions.
+- Menu mentions "Don Julio Reposado" but the APL only lists "Don Julio Blanco" and "Don Julio 1942" → DO NOT include "Don Julio Reposado" as a separate brand. (You may NOT count it against Don Julio Blanco either — it's a different SKU.)
+- Menu mentions "Fever Tree Tonic Water" but the APL only lists "Fever-Tree Ginger Beer" → DO NOT count Tonic Water mentions.
+
+Non-APL brands should be **silently ignored**. Do NOT flag them as compliance issues. Do NOT add them to brand_impressions. They are simply out of scope for this analysis.
+
+The exception: if a menu mention is an ABBREVIATION of an APL brand (per "Matching Abbreviated Names" below), it counts as a hit for that APL brand. E.g., "Ketel One Cucumber & Mint" on a menu is an abbreviation of "Ketel One Botanical Cucumber & Mint Vodka" in the APL — count it for the APL entry.
+
+**WHAT COUNTS AS AN APPEARANCE:**
+- The brand name is written in a cocktail recipe ingredient list
+- The brand name is listed in a spirits/cocktail/wine/beer inventory section
+- The brand name is listed in a mixers, soft drinks, or non-alcoholic panel
+- The brand name appears in any sidebar, callout box, featured-product section, or pricing list
+- **The brand name appears in a cocktail's name/title.** Example: "Ole Skrewball Old Fashioned" → 1 impression for "Skrewball Peanut Butter Whiskey" from the title (in addition to any impressions from the ingredient list).
+- **Text near or beside a cocktail image that names a brand.** Example: a featured-drink image with adjacent callout text "Made with Ketel One" → 1 impression. This is counted separately from any ingredient-list mention of the same brand for the same drink.
+- **A brand visible in an image** — on a bottle label, on branded glassware, on a garnish pick, or anywhere else the brand identity is visually present in the photograph. Example: an espresso martini photo with a recognizable Ketel One bottle in the shot → 1 impression. Be cautious here: only count brands you can identify with reasonable confidence from visual features (label text you can read, distinctive bottle shape, prominent logo).
+- Abbreviated forms count too (see "Matching Abbreviated Names" below)
+
+**Each surface is counted separately.** A single featured cocktail can produce multiple impressions for the same brand if the brand appears (1) in the recipe ingredients, (2) in callout text beside the image, AND (3) on a visible bottle in the image. Suppliers pay for surface visibility, not unique drinks.
+
+**TAG THE SOURCE OF EACH MENTION (this enables auditing):**
+In the "cocktails" array for each brand, tag the source so impressions can be traced back to the menu:
+- Recipe ingredient: no tag needed → "Espresso Martini"
+- Cocktail title mention: "Ole Skrewball Old Fashioned (title)"
+- Image callout text: "Espresso Martini (image text)"
+- Brand visible in image: "Espresso Martini (image)"
+- Spirits/mixer list: "Spirits List"
+
+If the same cocktail produces multiple impressions for one brand, list each source as a separate array entry. Example: "cocktails": ["Espresso Martini", "Espresso Martini (image text)", "Espresso Martini (image)"]
+
+**WHAT DOES NOT COUNT (rare but important):**
+- Brand mentioned in negative context: "we don't carry X," "X is unavailable," "alternative to X"
+- Brand in copyright/legal footer or trademark disclaimer
+- Brand referenced as inspiration without being used: "inspired by X" without X being an actual ingredient
+- Brand in allergen warnings or compliance text that isn't a product listing
+
+When in doubt: if the brand name is on the menu as something the venue carries, lists, or uses — count it.
+
+**MATCHING ABBREVIATED NAMES (this is critical):**
+Menus often abbreviate brand names. When the abbreviation is unambiguous, count it as an impression of the full product. Examples from real menus:
+- "Ketel One Cucumber & Mint" → counts as "Ketel One Botanical Cucumber & Mint Vodka"
+- "Tito's" or "Tito's Handmade" → counts as "Tito's Handmade"
+- "Maker's Mark" or "Maker's 46" → counts as "Maker's Mark 46 Bourbon"
+- "Angel's Envy" → counts as "Angel's Envy Bourbon"
+- "Espolón Blanco" or "Espolòn Blanco" (with or without accent) → counts as "Espolón Blanco Tequila"
+- "BACARDÍ Superior" or "Bacardi" → counts as "BACARDÍ Superior"
+- "Jack Daniel's" → counts as "Jack Daniel's Tennessee Whiskey"
+- "Tanqueray" → counts as "Tanqueray London Dry Gin"
+- "Bulleit" → counts as "Bulleit Bourbon"
+- "Crown Royal" → counts as "Crown Royal Canadian Whisky"
+
+If an abbreviation could refer to multiple APL products (e.g., "Don Julio" could be Blanco or Reposado), use surrounding context. If still ambiguous, count it under the most basic/common variant and note it under compliance.
+
+**WHAT IS NOT A COMPLIANCE ISSUE:**
+Reasonable abbreviations on a menu are normal and acceptable. Do NOT flag these as compliance issues:
+- "Ketel One Cucumber & Mint" (clearly the Botanical product)
+- "Tito's" (clearly Tito's Handmade)
+- "Maker's Mark 46" (just shorthand for the full name)
+- Any abbreviation listed in the matching examples above
+
+**WHAT IS a compliance issue (YOU MUST FLAG THESE — this section matters):**
+When an APL brand is mentioned on the menu but the rendering is genuinely problematic, flag it. Be proactive — if you're unsure whether a mention qualifies, lean toward flagging it. This is a key part of the tool's value. Flag:
+
+- **Incomplete brand names that are ambiguous or undersell the brand.** Examples:
+  - Menu says "Jack" or "Jack Daniel's" → APL has "Jack Daniel's Tennessee Whiskey". Flag — the menu should include the full product name.
+  - Menu says "Absolut Vodka" → APL has "Absolut". Flag if the menu adds a generic descriptor that's not part of the official brand name, OR omits the variant (e.g., menu says "Absolut" generically when the APL distinguishes Absolut/Absolut Citron/Absolut Elyx).
+  - Menu says "Crown" or "Crown Royal" → APL has "Crown Royal Canadian Whisky". Flag — too generic to identify the SKU.
+  - Menu says "Jim" or "Jim Beam" → APL has "Jim Beam Bourbon". Flag — missing the product specifier.
+- **Misspellings of brand names.** "Bacardy" instead of "Bacardi", "Hennesy" instead of "Hennessy", etc.
+- **Wrong product variants** — menu lists one variant in the ingredients but the recipe context suggests another (e.g., menu says "Don Julio Blanco" in a recipe that would typically use Reposado). Flag for review.
+- **Inconsistent renderings of the same brand within one menu** — if the same APL brand appears two different ways on the same menu (e.g., "Tito's Handmade" in one recipe and just "Tito's Vodka" in another), flag the inconsistency.
+
+**IMPORTANT — DISTINGUISHING OFF-APL FROM COMPLIANCE ISSUES:**
+- If a brand on the menu is NOT in the APL at all (e.g., menu mentions "Ole Smoky" but Ole Smoky is nowhere in the APL list) → silently ignore. Do not flag.
+- If a brand on the menu IS in the APL but is written incorrectly (incomplete, misspelled, wrong variant) → FLAG IT as a compliance issue.
+
+The distinction: off-APL = out of scope, ignore. APL brand rendered poorly = flag for client awareness.
+
+**ALWAYS return the compliance_issues array.** If you genuinely find no compliance issues, return an empty array like "compliance_issues": []. Never omit the field. Always look for issues before declaring there are none — be proactive about finding them.
 
 **RETURN ONLY THIS JSON STRUCTURE - no other fields, no recipe text, no cocktail list:**
 \`\`\`json
 {
   "brand_impressions": {
     "Brand Name": {
-      "count": 3,
+      "count": 4,
       "supplier": "SUPPLIER",
-      "cocktails": ["Cocktail 1", "Cocktail 2"]
+      "cocktails": ["Cocktail Name", "Cocktail Name (image text)", "Cocktail Name (image)", "Spirits List"]
     }
   },
   "compliance_issues": [
@@ -256,6 +405,29 @@ ${brandList}
   ]
 }
 \`\`\`
+
+For spirits list mentions, use "Spirits List" as the cocktail name.
+
+**CRITICAL — BRAND NAME FORMATTING IN JSON KEYS:**
+The "Brand Name" key in your JSON response MUST be just the brand name. Do NOT include the supplier in parentheses. Do NOT include region/origin descriptors that appear after the brand name in the APL list.
+
+Examples:
+- APL list shows: "- Ketel One (DIAGEO)" → JSON key: "Ketel One"
+- APL list shows: "- Appleton Estate 12-year Rare Blend (Jamacian) (CAMPARI)" → JSON key: "Appleton Estate 12-year Rare Blend"
+- APL list shows: "- Zacapa 23 (Guatemala) (DIAGEO)" → JSON key: "Zacapa 23"
+- APL list shows: "- Don Q Cristal + (light spanish) (SERRALLES)" → JSON key: "Don Q Cristal"
+- APL list shows: "- Oban - 14 year old (Highland) (DIAGEO)" → JSON key: "Oban 14 year old" (strip "- " and "(Highland)")
+- APL list shows: "- Macallan Glenrothes - 18 year old (Speyside) (EDRINGTON)" → JSON key: "Macallan Glenrothes 18 year old"
+
+Always put the supplier in the separate "supplier" field, never in the brand name key. Always strip trailing region/origin descriptors. The brand name should be clean and consistent so identical brands across multiple menus aggregate correctly.
+
+**USE THE APL CANONICAL FORM AS THE KEY, NOT THE MENU'S WORDING.**
+Regardless of how the menu writes a brand, use the cleaned APL form as the JSON key. Examples:
+- Menu says "Oban 14yr" → APL has "Oban - 14 year old (Highland)" → JSON key: "Oban 14 year old"
+- Menu says "Maker's 46" → APL has "Maker's Mark 46 Bourbon" → JSON key: "Maker's Mark 46 Bourbon"
+- Menu says "Tito's" → APL has "Tito's Handmade" → JSON key: "Tito's Handmade"
+
+This ensures the same brand reported across multiple menus aggregates into one row, not multiple rows for different abbreviations.
 
 ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anywhere.`,
               },
@@ -291,18 +463,29 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
 
   const aggregateBySupplier = (menuAnalyses) => {
     const supplierTotals = {};
+    // Map: supplier -> lowercased brand -> canonical display name (first seen)
+    // So "Absolut" and "ABSOLUT" both bucket into whichever appeared first.
+    const canonicalDisplayName = {};
 
     menuAnalyses.forEach((menu) => {
       Object.entries(menu.brand_impressions || {}).forEach(([brand, data]) => {
         const supplier = data.supplier || 'UNKNOWN';
+        const brandKey = brand.trim().toLowerCase();
 
         if (!supplierTotals[supplier]) {
           supplierTotals[supplier] = { total: 0, brands: {}, locations: {} };
+          canonicalDisplayName[supplier] = {};
         }
 
+        // Pick display name: first one we see for this normalized key
+        if (!canonicalDisplayName[supplier][brandKey]) {
+          canonicalDisplayName[supplier][brandKey] = brand.trim();
+        }
+        const displayName = canonicalDisplayName[supplier][brandKey];
+
         supplierTotals[supplier].total += data.count;
-        supplierTotals[supplier].brands[brand] =
-          (supplierTotals[supplier].brands[brand] || 0) + data.count;
+        supplierTotals[supplier].brands[displayName] =
+          (supplierTotals[supplier].brands[displayName] || 0) + data.count;
         supplierTotals[supplier].locations[menu.location] =
           (supplierTotals[supplier].locations[menu.location] || 0) + data.count;
       });
@@ -311,6 +494,19 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
     return Object.entries(supplierTotals)
       .map(([supplier, data]) => ({ supplier, ...data }))
       .sort((a, b) => b.total - a.total);
+  };
+
+  // Helper for per-menu lookup: find a brand's count in a menu's
+  // brand_impressions map, matching case-insensitively.
+  const findMenuBrandCount = (menu, brandName) => {
+    if (!menu || !menu.brand_impressions) return 0;
+    const target = brandName.trim().toLowerCase();
+    for (const [name, data] of Object.entries(menu.brand_impressions)) {
+      if (name.trim().toLowerCase() === target) {
+        return data.count || 0;
+      }
+    }
+    return 0;
   };
 
   const exportToCSV = () => {
@@ -322,15 +518,18 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
 
     results.aggregated.forEach((supplier) => {
       Object.entries(supplier.brands).forEach(([brand, totalCount]) => {
-        const nycCount =
-          results.menuAnalyses.find((m) => m.location === 'New York City')
-            ?.brand_impressions?.[brand]?.count || 0;
-        const lvCount =
-          results.menuAnalyses.find((m) => m.location === 'Las Vegas')
-            ?.brand_impressions?.[brand]?.count || 0;
-        const dcCount =
-          results.menuAnalyses.find((m) => m.location === 'Washington DC')
-            ?.brand_impressions?.[brand]?.count || 0;
+        const nycCount = findMenuBrandCount(
+          results.menuAnalyses.find((m) => m.location === 'New York City'),
+          brand
+        );
+        const lvCount = findMenuBrandCount(
+          results.menuAnalyses.find((m) => m.location === 'Las Vegas'),
+          brand
+        );
+        const dcCount = findMenuBrandCount(
+          results.menuAnalyses.find((m) => m.location === 'Washington DC'),
+          brand
+        );
 
         rows.push([
           supplier.supplier,
@@ -348,7 +547,7 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `emberwatch-apl-${new Date().toISOString().split('T')[0]}.csv`;
+    a.download = `firewatch-apl-${new Date().toISOString().split('T')[0]}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -382,7 +581,14 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
           analyzing={analyzing}
           progress={progress}
           error={error}
+          activeApl={activeApl}
+          customApl={customApl}
+          aplError={aplError}
+          aplInputRef={aplInputRef}
           onPickFiles={() => fileInputRef.current?.click()}
+          onPickApl={() => aplInputRef.current?.click()}
+          onAplUpload={handleAplUpload}
+          onClearApl={clearCustomApl}
           onFileUpload={handleFileUpload}
           onDropFiles={(files) => {
             setUploadedFiles(files);
@@ -426,7 +632,14 @@ function UploadView({
   analyzing,
   progress,
   error,
+  activeApl,
+  customApl,
+  aplError,
+  aplInputRef,
   onPickFiles,
+  onPickApl,
+  onAplUpload,
+  onClearApl,
   onFileUpload,
   onDropFiles,
   onAnalyze,
@@ -434,86 +647,155 @@ function UploadView({
 }) {
   return (
     <div style={{ width: '98%', margin: '0 auto', padding: '0 20px' }}>
+      {/* APL selection panel */}
       <div
         style={{
-          background: 'linear-gradient(135deg, #da291c 0%, #ff6b35 100%)',
-          borderRadius: '20px',
-          padding: '60px',
-          marginBottom: '30px',
-          boxShadow: '0 20px 60px rgba(218, 41, 28, 0.4)',
-          animation: 'glow 3s ease-in-out infinite',
-          position: 'relative',
-          overflow: 'hidden',
+          background: 'white',
+          borderRadius: '16px',
+          padding: '24px 32px',
+          marginBottom: '24px',
+          boxShadow: '0 2px 8px rgba(0,0,0,0.06)',
+          border: customApl ? '2px solid #da291c' : '2px solid #ececec',
         }}
       >
         <div
           style={{
-            position: 'absolute',
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            background:
-              'radial-gradient(circle at 50% 50%, rgba(255,255,255,0.1) 0%, transparent 70%)',
-            animation: 'flicker 4s ease-in-out infinite',
-            pointerEvents: 'none',
+            display: 'flex',
+            flexDirection: 'column',
+            justifyContent: 'center',
+            alignItems: 'center',
+            textAlign: 'center',
+            gap: '20px',
           }}
-        />
-
-        <div style={{ position: 'relative', zIndex: 1, textAlign: 'center' }}>
-          <div style={{ marginBottom: '20px' }}>
+        >
+          <div>
             <div
               style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: '20px',
-                marginBottom: '15px',
+                fontSize: '11px',
+                fontWeight: '800',
+                color: '#999',
+                letterSpacing: '2px',
+                textTransform: 'uppercase',
+                marginBottom: '6px',
               }}
             >
-              <Flame
-                size={64}
-                color="white"
-                fill="white"
-                style={{ animation: 'flicker 2s ease-in-out infinite' }}
-              />
-              <h1
-                style={{
-                  fontSize: '56px',
-                  fontWeight: '900',
-                  margin: 0,
-                  color: 'white',
-                  letterSpacing: '-2px',
-                  textShadow: '0 4px 20px rgba(0,0,0,0.3)',
-                  lineHeight: '1',
-                }}
-              >
-                Emberwatch
-              </h1>
+              Active APL
             </div>
-            <p
+            <div
               style={{
                 fontSize: '20px',
-                margin: 0,
-                color: 'rgba(255,255,255,0.9)',
-                fontWeight: '600',
-                letterSpacing: '1px',
+                fontWeight: '800',
+                color: '#1a1a1a',
+                letterSpacing: '-0.3px',
               }}
             >
-              Impressions Tracker
-            </p>
+              {activeApl.name}
+            </div>
+            <div
+              style={{
+                fontSize: '14px',
+                color: '#666',
+                marginTop: '4px',
+                fontWeight: '500',
+              }}
+            >
+              {activeApl.brands.length} brand
+              {activeApl.brands.length !== 1 ? 's' : ''} loaded ·{' '}
+              {customApl ? 'Custom upload' : 'Using built-in list'}
+            </div>
           </div>
-          <p
+          <div
             style={{
-              fontSize: '18px',
-              color: 'rgba(255,255,255,0.95)',
-              margin: 0,
-              fontWeight: '500',
+              display: 'flex',
+              gap: '10px',
+              flexWrap: 'wrap',
+              justifyContent: 'center',
             }}
           >
-            Upload cocktail menu PDFs to track brand compliance and count
-            impressions
-          </p>
+            <input
+              ref={aplInputRef}
+              type="file"
+              accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
+              onChange={onAplUpload}
+              style={{ display: 'none' }}
+            />
+            <button
+              onClick={onPickApl}
+              style={{
+                background: 'white',
+                color: '#da291c',
+                border: '2px solid #da291c',
+                padding: '12px 22px',
+                borderRadius: '8px',
+                fontSize: '13px',
+                fontWeight: '800',
+                cursor: 'pointer',
+                textTransform: 'uppercase',
+                letterSpacing: '1px',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '8px',
+              }}
+            >
+              <Upload size={16} />
+              {customApl ? 'Replace APL' : 'Upload Custom APL'}
+            </button>
+            {customApl && (
+              <button
+                onClick={onClearApl}
+                style={{
+                  background: 'transparent',
+                  color: '#666',
+                  border: '2px solid #ddd',
+                  padding: '12px 22px',
+                  borderRadius: '8px',
+                  fontSize: '13px',
+                  fontWeight: '800',
+                  cursor: 'pointer',
+                  textTransform: 'uppercase',
+                  letterSpacing: '1px',
+                }}
+              >
+                Use Built-in
+              </button>
+            )}
+          </div>
+        </div>
+
+        {aplError && (
+          <div
+            style={{
+              marginTop: '16px',
+              padding: '12px 16px',
+              background: '#fff5f5',
+              border: '1px solid #da291c',
+              borderRadius: '8px',
+              color: '#da291c',
+              fontSize: '14px',
+              fontWeight: '600',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '10px',
+            }}
+          >
+            <AlertTriangle size={18} />
+            {aplError}
+          </div>
+        )}
+
+        <div
+          style={{
+            marginTop: '14px',
+            fontSize: '12px',
+            color: '#999',
+            lineHeight: '1.6',
+            textAlign: 'center',
+          }}
+        >
+          Upload a CSV or Excel file with{' '}
+          <strong style={{ color: '#666' }}>Brand Name</strong> and{' '}
+          <strong style={{ color: '#666' }}>Supplier</strong> columns to use a
+          client-specific list instead of the built-in.
         </div>
       </div>
 
@@ -641,9 +923,7 @@ function UploadView({
           disabled={analyzing || uploadedFiles.length === 0}
           style={{
             width: '100%',
-            background: analyzing
-              ? 'linear-gradient(135deg, #999 0%, #666 100%)'
-              : 'linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%)',
+            background: analyzing ? '#999' : '#da291c',
             color: 'white',
             border: 'none',
             padding: '28px',
@@ -660,7 +940,7 @@ function UploadView({
             alignItems: 'center',
             justifyContent: 'center',
             gap: '12px',
-            boxShadow: '0 8px 24px rgba(0,0,0,0.3)',
+            boxShadow: '0 4px 12px rgba(218, 41, 28, 0.25)',
           }}
         >
           {analyzing ? (
@@ -1718,6 +1998,226 @@ function EmailReportView({ results, onBack }) {
 }
 
 // ---------------------------------------------------------------------------
+// APL parsers. Two entry points (CSV text and SheetJS row arrays) share the
+// same header-matching logic so behavior is identical across file types.
+// ---------------------------------------------------------------------------
+
+// Common header variants we look for
+const BRAND_HEADERS = ['brand name', 'brand', 'name', 'product', 'product name'];
+const SUPPLIER_HEADERS = ['supplier', 'vendor', 'company', 'distributor'];
+
+// Locate brand + supplier column indexes from an array of header strings.
+function findAplColumns(headers) {
+  const lower = headers.map((h) => String(h || '').trim().toLowerCase());
+  const brandIdx = lower.findIndex((h) => BRAND_HEADERS.includes(h));
+  const supplierIdx = lower.findIndex((h) => SUPPLIER_HEADERS.includes(h));
+
+  if (brandIdx === -1) {
+    throw new Error(
+      'Could not find a brand column. Expected a header like "Brand Name", "Brand", or "Name".'
+    );
+  }
+  if (supplierIdx === -1) {
+    throw new Error(
+      'Could not find a supplier column. Expected a header like "Supplier" or "Vendor".'
+    );
+  }
+  return { brandIdx, supplierIdx };
+}
+
+// Parse a 2D array (typically from XLSX.utils.sheet_to_json with header:1)
+// into [{ name, supplier }].
+function parseAplRows(rows) {
+  if (!rows || rows.length < 2) {
+    throw new Error('Spreadsheet must have a header row and at least one data row.');
+  }
+
+  const { brandIdx, supplierIdx } = findAplColumns(rows[0]);
+  const brands = [];
+
+  for (let i = 1; i < rows.length; i++) {
+    const row = rows[i] || [];
+    const name = String(row[brandIdx] || '').trim();
+    const supplier = String(row[supplierIdx] || '').trim();
+    if (!name) continue;
+    brands.push({ name, supplier: supplier || 'UNKNOWN' });
+  }
+
+  return brands;
+}
+
+function parseAplCsv(text) {
+  // Strip BOM and split into lines, dropping empty ones
+  const cleaned = text.replace(/^\uFEFF/, '');
+  const lines = cleaned
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+
+  if (lines.length < 2) {
+    throw new Error('CSV must have a header row and at least one data row.');
+  }
+
+  // Parse a single CSV line, handling quoted fields with internal commas.
+  const parseLine = (line) => {
+    const fields = [];
+    let current = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (c === '"') {
+        // Doubled quote inside a quoted field = literal quote
+        if (inQuotes && line[i + 1] === '"') {
+          current += '"';
+          i++;
+        } else {
+          inQuotes = !inQuotes;
+        }
+      } else if (c === ',' && !inQuotes) {
+        fields.push(current);
+        current = '';
+      } else {
+        current += c;
+      }
+    }
+    fields.push(current);
+    return fields.map((f) => f.trim());
+  };
+
+  const rows = lines.map(parseLine);
+  return parseAplRows(rows);
+}
+
+// ---------------------------------------------------------------------------
+// Parse a structured APL workbook (multiple sheets, side-by-side category
+// blocks, "SUPPLIER" column headers). Used as a fallback when the flat parser
+// can't find a single "Brand Name" / "Supplier" header row — i.e., for the
+// real-world client APL format we see in production.
+//
+// Algorithm:
+//   1. For each sheet, find every column that contains a "SUPPLIER" header
+//      cell somewhere. These are the supplier columns.
+//   2. Each supplier column owns a column zone: from (previous supplier + 1)
+//      through itself. So a sheet with suppliers in cols B, E, H has zones
+//      A-B, C-E, F-H.
+//   3. For each zone, identify the brand column by voting: in every row that
+//      contains a SUPPLIER header in that zone's supplier column, find the
+//      leftmost non-empty cell in the zone. The column with the most votes
+//      wins (ties broken leftward).
+//   4. Walk every data row in the sheet. Skip rows that are SUPPLIER-header
+//      rows themselves. For each row, pair the brand cell with the supplier
+//      cell. Skip rows where either is empty or looks like a category header.
+// ---------------------------------------------------------------------------
+
+function parseStructuredXlsxApl(workbook) {
+  const brands = [];
+  const seen = new Set();
+
+  // Heuristic: a brand string that looks like a category header
+  // (e.g., "RUM - 10", "TEQUILA - 17 (order silver - extra anejo)")
+  const looksLikeCategoryHeader = (s) => {
+    if (/^[A-Z/\s\-]+ - \d+/.test(s)) return true;
+    if (/.+- \d+\s*\(.+\)?\s*$/.test(s)) return true;
+    return false;
+  };
+
+  for (const sheetName of workbook.SheetNames) {
+    const sheet = workbook.Sheets[sheetName];
+    if (!sheet || !sheet['!ref']) continue;
+
+    const range = XLSX.utils.decode_range(sheet['!ref']);
+    const maxRow = range.e.r;
+    const maxCol = range.e.c;
+
+    // Helper: read a cell's string value (0-indexed row + col)
+    const cellAt = (r, c) => {
+      const addr = XLSX.utils.encode_cell({ r, c });
+      const cell = sheet[addr];
+      if (!cell || cell.v === undefined || cell.v === null) return '';
+      return String(cell.v).trim();
+    };
+
+    // Step 1: find all unique SUPPLIER columns
+    const supplierCols = new Set();
+    for (let r = 0; r <= maxRow; r++) {
+      for (let c = 0; c <= maxCol; c++) {
+        if (cellAt(r, c).toUpperCase() === 'SUPPLIER') {
+          supplierCols.add(c);
+        }
+      }
+    }
+    if (supplierCols.size === 0) continue;
+    const sortedSupCols = Array.from(supplierCols).sort((a, b) => a - b);
+
+    // Step 2: build column zones
+    const zones = [];
+    let prev = -1;
+    for (const sc of sortedSupCols) {
+      zones.push({ start: prev + 1, end: sc, supplierCol: sc });
+      prev = sc;
+    }
+
+    // Step 3: for each zone, vote on the brand column
+    for (const zone of zones) {
+      const votes = {};
+      const headerRows = [];
+      for (let r = 0; r <= maxRow; r++) {
+        if (cellAt(r, zone.supplierCol).toUpperCase() === 'SUPPLIER') {
+          headerRows.push(r);
+          for (let c = zone.start; c < zone.end; c++) {
+            if (cellAt(r, c)) {
+              votes[c] = (votes[c] || 0) + 1;
+              break;
+            }
+          }
+        }
+      }
+      if (Object.keys(votes).length === 0) continue;
+      // Most votes wins; ties broken leftmost
+      const brandCol = Object.entries(votes)
+        .map(([k, v]) => [Number(k), v])
+        .sort((a, b) => b[1] - a[1] || a[0] - b[0])[0][0];
+      zone.brandCol = brandCol;
+      zone.headerRows = new Set(headerRows);
+    }
+
+    // Step 4: walk data rows for each zone
+    for (const zone of zones) {
+      if (zone.brandCol === undefined) continue;
+      for (let r = 0; r <= maxRow; r++) {
+        if (zone.headerRows.has(r)) continue;
+        const brandRaw = cellAt(r, zone.brandCol);
+        const supplierRaw = cellAt(r, zone.supplierCol);
+        if (!brandRaw || !supplierRaw) continue;
+        if (supplierRaw.toUpperCase() === 'SUPPLIER') continue;
+
+        // Skip junk
+        if (brandRaw.toUpperCase().startsWith('LOCATIONS')) continue;
+        if (brandRaw.startsWith('*')) continue;
+        if (looksLikeCategoryHeader(brandRaw)) continue;
+
+        // Skip suppliers that are clearly punctuation/junk
+        if (supplierRaw.length < 2) continue;
+
+        const key = `${brandRaw.toLowerCase()}|${supplierRaw.toLowerCase()}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        brands.push({ name: brandRaw, supplier: supplierRaw });
+      }
+    }
+  }
+
+  if (brands.length === 0) {
+    throw new Error(
+      'Could not extract brands from this spreadsheet. Looking for either a flat "Brand Name | Supplier" header row, or category blocks with "SUPPLIER" column headers.'
+    );
+  }
+
+  return brands;
+}
+
+// ---------------------------------------------------------------------------
 // Build the per-supplier email list from the aggregated analysis results.
 // ---------------------------------------------------------------------------
 
@@ -1783,7 +2283,7 @@ Best regards,
 The Ignite Team
 
 —
-Generated by Emberwatch - Ignite Creative Services LLC · ${new Date().toLocaleDateString()}`;
+Generated by Fire Watch - Ignite Creative Services LLC · ${new Date().toLocaleDateString()}`;
 
     return {
       supplier: supplier.supplier,

@@ -4,7 +4,7 @@ import { CheckCircle2, Circle, MessageSquare, ThumbsUp, ThumbsDown, Clock, Calen
 export default function LeadershipDashboard() {
   const [projects, setProjects] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [filter, setFilter] = useState('active'); // active or pending
+  const [filter, setFilter] = useState('pending'); // pending is the default — reviewers land on what needs review
   const [selectedProject, setSelectedProject] = useState(null);
   const [expandedProject, setExpandedProject] = useState(null);
 
@@ -95,10 +95,10 @@ export default function LeadershipDashboard() {
         display: 'flex', 
         justifyContent: 'center', 
         alignItems: 'center', 
-        height: '100vh',
+        padding: '80px 20px',
         fontFamily: '"Brandon Grotesque", "Helvetica Neue", Arial, sans-serif',
-        background: '#da291c',
-        color: 'white'
+        background: '#f5f5f5',
+        color: '#1a1a1a'
       }}>
         Loading The Forge...
       </div>
@@ -107,122 +107,71 @@ export default function LeadershipDashboard() {
 
   return (
     <div style={{
-      minHeight: '100vh',
-      background: '#da291c',
+      background: '#f5f5f5',
       fontFamily: '"Brandon Grotesque", "Helvetica Neue", Arial, sans-serif',
       display: 'flex'
     }}>
       {/* Main Content */}
       <div style={{
         flex: 1,
-        padding: '40px',
+        padding: '30px 40px',
         display: 'flex',
         flexDirection: 'column'
       }}>
-        {/* Header */}
-        <div style={{ marginBottom: '40px', textAlign: 'center' }}>
-          {/* Title */}
-          <div style={{ marginBottom: '30px' }}>
-            <h1 style={{
-              margin: '0 0 8px 0',
-              fontSize: '48px',
-              fontWeight: '900',
-              color: 'white',
-              letterSpacing: '-1px'
-            }}>
-              The Forge
-            </h1>
-            <p style={{
-              margin: 0,
-              fontSize: '14px',
-              color: 'rgba(255,255,255,0.8)',
-              textTransform: 'uppercase',
-              letterSpacing: '2px',
-              fontWeight: '600'
-            }}>
-              Ignite CS
-            </p>
-          </div>
-
-          {/* Logo (if available) */}
-          {false && (
-            <img 
-              src="/forge-logo.png" 
-              alt="The Forge" 
-              style={{ 
-                width: '150px', 
-                height: '150px', 
-                objectFit: 'contain',
-                marginBottom: '20px'
-              }} 
-            />
-          )}
-
-          {/* Search & Filter */}
-          <div style={{ display: 'flex', gap: '15px', alignItems: 'center', justifyContent: 'center', maxWidth: '800px', margin: '0 auto' }}>
-            <div style={{
-              flex: 1,
-              background: 'white',
-              borderRadius: '30px',
-              padding: '12px 25px',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '10px'
-            }}>
-              <span style={{ fontSize: '18px' }}>🔍</span>
-              <input 
-                type="text"
-                placeholder="Search Projects"
-                style={{
-                  border: 'none',
-                  outline: 'none',
-                  flex: 1,
-                  fontSize: '16px',
-                  fontFamily: 'inherit',
-                  fontStyle: 'italic'
-                }}
-              />
-            </div>
-            <div style={{
-              display: 'flex',
-              gap: '5px',
-              background: 'rgba(0,0,0,0.2)',
-              borderRadius: '30px',
-              padding: '5px'
-            }}>
-              <button
-                onClick={() => setFilter('active')}
-                style={{
-                  padding: '10px 30px',
-                  borderRadius: '25px',
-                  border: 'none',
-                  background: filter === 'active' ? 'white' : 'transparent',
-                  color: filter === 'active' ? '#da291c' : 'white',
-                  fontSize: '14px',
-                  fontWeight: '700',
-                  cursor: 'pointer',
-                  transition: 'all 0.2s ease'
-                }}
-              >
-                Active
-              </button>
-              <button
-                onClick={() => setFilter('pending')}
-                style={{
-                  padding: '10px 30px',
-                  borderRadius: '25px',
-                  border: 'none',
-                  background: filter === 'pending' ? 'white' : 'transparent',
-                  color: filter === 'pending' ? '#da291c' : 'white',
-                  fontSize: '14px',
-                  fontWeight: '700',
-                  cursor: 'pointer',
-                  transition: 'all 0.2s ease'
-                }}
-              >
-                Pending
-              </button>
-            </div>
+        {/* Toolbar: filter only */}
+        <div style={{
+          background: 'white',
+          borderRadius: '8px',
+          padding: '20px 30px',
+          marginBottom: '24px',
+          boxShadow: '0 2px 8px rgba(0, 0, 0, 0.06)',
+          display: 'flex',
+          justifyContent: 'flex-end',
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          gap: '20px'
+        }}>
+          {/* Filter Toggle */}
+          <div style={{
+            display: 'flex',
+            gap: '5px',
+            background: '#f0f0f0',
+            borderRadius: '30px',
+            padding: '5px',
+            width: 'fit-content'
+          }}>
+            <button
+              onClick={() => setFilter('pending')}
+              style={{
+                padding: '10px 30px',
+                borderRadius: '25px',
+                border: 'none',
+                background: filter === 'pending' ? '#da291c' : 'transparent',
+                color: filter === 'pending' ? 'white' : '#666',
+                fontSize: '14px',
+                fontWeight: '700',
+                cursor: 'pointer',
+                transition: 'all 0.2s ease'
+              }}
+            >
+              Pending
+            </button>
+            <button
+              onClick={() => setFilter('active')}
+              style={{
+                padding: '10px 30px',
+                borderRadius: '25px',
+                border: 'none',
+                background: filter === 'active' ? '#da291c' : 'transparent',
+                color: filter === 'active' ? 'white' : '#666',
+                fontSize: '14px',
+                fontWeight: '700',
+                cursor: 'pointer',
+                transition: 'all 0.2s ease'
+              }}
+            >
+              Active
+            </button>
           </div>
         </div>
 
@@ -232,7 +181,8 @@ export default function LeadershipDashboard() {
           background: 'white',
           borderRadius: '20px',
           padding: '30px',
-          overflowY: 'auto'
+          overflowY: 'auto',
+          boxShadow: '0 2px 8px rgba(0, 0, 0, 0.06)'
         }}>
           {filteredProjects.length === 0 ? (
             <div style={{ textAlign: 'center', padding: '60px', color: '#999' }}>
