@@ -1,0 +1,72 @@
+{
+  "_todo": "SEED DATA ONLY. This is a hand-written stand-in so Alembic can be grounded today. Replace it with the real recipe DB once it exists. NOTE: CLAUDE.md / the task brief mention Supabase, but this repo's source of truth is Airtable (see api/rfp.js) — there is no Supabase and no recipe/vocabulary table yet. When one lands (Airtable `ingredients`/`glasses`/`garnishes`/`tags` tables, or a Supabase table), swap loadVocabulary() in api/_lib/vocabulary.js to read from it and keep this same { ingredients, glasses, garnishes, tags, builds } shape so the prompts and validators don't change.",
+  "ingredients": [
+    { "name": "gin", "roles": ["base"], "defaultUnit": "oz" },
+    { "name": "vodka", "roles": ["base"], "defaultUnit": "oz" },
+    { "name": "white rum", "roles": ["base"], "defaultUnit": "oz" },
+    { "name": "tequila blanco", "roles": ["base"], "defaultUnit": "oz" },
+    { "name": "Campari", "roles": ["bittersweet"], "defaultUnit": "oz" },
+    { "name": "Aperol", "roles": ["bittersweet"], "defaultUnit": "oz" },
+    { "name": "sweet vermouth", "roles": ["aromatic", "bittersweet"], "defaultUnit": "oz" },
+    { "name": "dry vermouth", "roles": ["aromatic"], "defaultUnit": "oz" },
+    { "name": "lime juice", "roles": ["acid"], "defaultUnit": "oz" },
+    { "name": "lemon juice", "roles": ["acid"], "defaultUnit": "oz" },
+    { "name": "simple syrup", "roles": ["sweet"], "defaultUnit": "oz" },
+    { "name": "honey syrup", "roles": ["sweet"], "defaultUnit": "oz" },
+    { "name": "Angostura bitters", "roles": ["aromatic"], "defaultUnit": "dash" },
+    { "name": "soda water", "roles": ["lengthener"], "defaultUnit": "oz" },
+    { "name": "tonic water", "roles": ["lengthener"], "defaultUnit": "oz" },
+    { "name": "prosecco", "roles": ["lengthener"], "defaultUnit": "oz" }
+  ],
+  "glasses": [
+    "coupe",
+    "martini",
+    "old fashioned",
+    "highball",
+    "collins",
+    "wine glass",
+    "flute",
+    "nick & nora",
+    "hurricane",
+    "julep tin",
+    "snifter",
+    "shot"
+  ],
+  "garnishes": [
+    "lemon twist",
+    "orange twist",
+    "grapefruit twist",
+    "lime wheel",
+    "orange slice",
+    "maraschino cherry",
+    "mint sprig",
+    "olive",
+    "cucumber ribbon",
+    "edible flower",
+    "dehydrated orange",
+    "none"
+  ],
+  "tags": [
+    "bitter",
+    "sour",
+    "sweet",
+    "refreshing",
+    "boozy",
+    "citrusy",
+    "herbal",
+    "bubbly",
+    "aromatic",
+    "light",
+    "complex",
+    "summer"
+  ],
+  "builds": [
+    "spritz",
+    "shaken sour",
+    "stirred",
+    "built",
+    "highball",
+    "flip",
+    "swizzle"
+  ]
+}
