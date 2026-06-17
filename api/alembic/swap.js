@@ -11,11 +11,75 @@
 // method, fail loudly on missing config, wrap in try/catch, log on error.
 
 import { loadVocabulary } from '../_lib/vocabulary.js';
-import { validateSwapResult } from '../_lib/drinkSchema.js';
+import { validateSwapResult, COMPONENT_ROLES } from '../_lib/drinkSchema.js';
 import { buildSwapSystemPrompt } from '../_lib/prompts/swapPrompt.js';
 import { generateValidatedJson } from '../_lib/claude.js';
 
 const MODEL = 'claude-sonnet-4-6';
+
+// Resolve a slot to a single category + slot-specific candidate list drawn from
+// the vocabulary, so Claude only ever sees in-category options. The current
+// value(s) for the slot are excluded from the candidates. `candidates` is null
+// for "method" (no fixed list — technique variations are allowed).
+function buildSwapPlan(vocab, drink, slot) {
+  if (COMPONENT_ROLES.includes(slot)) {
+    const currentNames = (Array.isArray(drink.components) ? drink.components : [])
+      .filter((c) => c && c.role === slot)
+      .map((c) => c.name);
+    const candidates = vocab.ingredients
+      .filter((i) => Array.isArray(i.roles) && i.roles.includes(slot))
+      .filter((i) => !currentNames.includes(i.name))
+      .map((i) => i.name);
+    return {
+      slot,
+      category: `${slot} ingredient`,
+      current: currentNames.join(', '),
+      candidates,
+      includeAmounts: true,
+    };
+  }
+
+  if (slot === 'glass') {
+    const current = typeof drink.glass === 'string' ? drink.glass : '';
+    return {
+      slot,
+      category: 'glass',
+      current,
+      candidates: vocab.glasses.filter((g) => g !== current),
+      includeAmounts: false,
+    };
+  }
+
+  if (slot === 'garnish') {
+    const current = Array.isArray(drink.garnish) ? drink.garnish : [];
+    return {
+      slot,
+      category: 'garnish',
+      current: current.join(', '),
+      candidates: vocab.garnishes.filter((g) => !current.includes(g)),
+      includeAmounts: false,
+    };
+  }
+
+  if (slot === 'method') {
+    return {
+      slot,
+      category: 'preparation method',
+      current: typeof drink.method === 'string' ? drink.method : '',
+      candidates: null, // no fixed list — allow technique variations
+      includeAmounts: false,
+    };
+  }
+
+  // Unknown slot — fall back to an unconstrained suggestion (no candidate set).
+  return {
+    slot,
+    category: `"${slot}"`,
+    current: '',
+    candidates: null,
+    includeAmounts: false,
+  };
+}
 
 export default async function handler(req, res) {
   if (req.method === 'OPTIONS') {
@@ -48,7 +112,8 @@ export default async function handler(req, res) {
     }
 
     const vocab = await loadVocabulary();
-    const system = buildSwapSystemPrompt(vocab);
+    const plan = buildSwapPlan(vocab, drink, slot);
+    const system = buildSwapSystemPrompt(plan);
     const user = `Slot to swap: ${slot}\nDrink:\n${JSON.stringify(drink, null, 2)}`;
 
     const result = await generateValidatedJson({
@@ -58,6 +123,25 @@ export default async function handler(req, res) {
       maxTokens: 1024,
       validate: validateSwapResult,
     });
+
+    // Defensive guard: for slots with a fixed candidate set, drop any
+    // alternative whose name isn't in that set so a stray cross-category
+    // suggestion (e.g. a spirit returned for a garnish) can't slip through.
+    if (plan.candidates !== null && Array.isArray(result.alternatives)) {
+      const allowed = new Set(plan.candidates.map((c) => c.toLowerCase().trim()));
+      const before = result.alternatives.length;
+      result.alternatives = result.alternatives.filter(
+        (alt) =>
+          alt &&
+          typeof alt.name === 'string' &&
+          allowed.has(alt.name.toLowerCase().trim())
+      );
+      if (result.alternatives.length !== before) {
+        console.warn(
+          `Alembic swap: dropped ${before - result.alternatives.length} out-of-category alternative(s) for slot "${slot}"`
+        );
+      }
+    }
 
     return res.status(200).json(result);
   } catch (err) {

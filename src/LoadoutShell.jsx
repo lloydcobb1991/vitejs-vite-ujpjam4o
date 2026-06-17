@@ -172,12 +172,12 @@ export default function LoadoutShell() {
             {swapState.status === "error" && <span style={{ fontSize: 13, color: "#A32D2D" }}>{swapState.error} <button onClick={() => swap(swapState.slot)} style={{ marginLeft: 6, font: "inherit", fontSize: 13, background: "none", border: "none", color: RED, cursor: "pointer", textDecoration: "underline" }}>retry</button></span>}
             {swapState.status === "ready" && swapState.alternatives.map((alt, i) => (
               <button key={i} title={alt.why} onClick={() => applySwap(swapState.slot, alt)}
-                style={{ fontSize: 13, padding: "5px 12px", borderRadius: 8, border: "0.5px solid #d6d4cb", background: "#fff", cursor: "pointer", font: "inherit" }}>
+                style={{ fontSize: 13, fontWeight: 500, padding: "5px 12px", borderRadius: 8, border: "0.5px solid #d6d4cb", background: "#fff", color: "#3a3a38", cursor: "pointer" }}>
                 {alt.name}
               </button>
             ))}
             <span style={{ flex: 1, minWidth: 8 }} />
-            <button onClick={() => alert("Detailed DB search — coming in a later build")} style={{ fontSize: 13, padding: "5px 12px", borderRadius: 8, border: "0.5px solid #d6d4cb", background: "#fff", cursor: "pointer", font: "inherit" }}>Detailed search ↗</button>
+            <button onClick={() => alert("Detailed DB search — coming in a later build")} style={{ fontSize: 13, padding: "5px 12px", borderRadius: 8, border: "0.5px solid #d6d4cb", background: "#fff", color: "#3a3a38", cursor: "pointer" }}>Detailed search ↗</button>
             <button onClick={cancelSwap} aria-label="Close" style={{ border: "none", background: "none", cursor: "pointer", fontSize: 16, color: "#9a988f", lineHeight: 1 }}>×</button>
           </div>
         )}
