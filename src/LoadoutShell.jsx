@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { DrinkRender } from "./DrinkRender";
 import { useAlembicDrink } from "./useAlembicDrink";
+import BookView from "./BookView";
 
 /*
   Alembic — LoadoutShell
@@ -82,10 +83,11 @@ function SlotCard({ slot, label, value, active, onClick }) {
 }
 
 export default function LoadoutShell() {
-  const { drink, status, error, generate, swap, swapState, applySwap, cancelSwap } = useAlembicDrink();
+  const { drink, status, error, generate, swap, swapState, applySwap, cancelSwap, setDrink, saveDrink, saveStatus } = useAlembicDrink();
   const [prompt, setPrompt] = useState("");
   const [vibe, setVibe] = useState("");
   const [notes, setNotes] = useState("");
+  const [view, setView] = useState("build"); // build | book
 
   const onGenerate = () => generate(prompt, vibe || undefined);
   const busy = status === "generating";
@@ -99,10 +101,34 @@ export default function LoadoutShell() {
     background: RED, color: "#fff", fontWeight: 500, fontSize: 14, cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1,
   };
 
+  // ---- Build | My book toggle (shown in every view) ----
+  const toggleBtn = (active) => ({
+    height: 30, padding: "0 14px", borderRadius: 7, font: "inherit", fontSize: 13, fontWeight: 500,
+    cursor: "pointer", border: active ? `1.5px solid ${RED}` : "0.5px solid #d6d4cb",
+    background: active ? "rgba(218,40,28,0.06)" : "#fff", color: active ? RED : "#6b6a64",
+  });
+  const Toggle = (
+    <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
+      <button style={toggleBtn(view === "build")} onClick={() => setView("build")}>Build</button>
+      <button style={toggleBtn(view === "book")} onClick={() => setView("book")}>My book</button>
+    </div>
+  );
+
+  // ---- My book view: browse saved drinks, reopen one to keep riffing ----
+  if (view === "book") {
+    return (
+      <div style={{ maxWidth: 760, margin: "0 auto", fontFamily: "system-ui, sans-serif", padding: "1rem 0" }}>
+        {Toggle}
+        <BookView onOpen={(d, n) => { setDrink(d); setNotes(n); setView("build"); }} />
+      </div>
+    );
+  }
+
   // ---- empty state: prompt-forward, not a blank form ----
   if (!drink) {
     return (
       <div style={{ maxWidth: 520, margin: "0 auto", fontFamily: "system-ui, sans-serif", padding: "1rem 0" }}>
+        {Toggle}
         <div style={{ height: 4, background: RED, borderRadius: 2, width: 48, marginBottom: 18 }} />
         <div style={{ fontSize: 22, fontWeight: 500, color: "#2c2c2a" }}>What are you in the mood to build?</div>
         <p style={{ fontSize: 14, color: "#6b6a64", margin: "6px 0 18px", lineHeight: 1.6 }}>
@@ -129,6 +155,8 @@ export default function LoadoutShell() {
     <div style={{ background: "#fff", border: "0.5px solid #d6d4cb", borderRadius: 12, overflow: "hidden", fontFamily: "system-ui, sans-serif", color: "#2c2c2a" }}>
       <div style={{ height: 4, background: RED }} />
       <div style={{ padding: "1.1rem 1.4rem 1.4rem" }}>
+
+        {Toggle}
 
         {/* header + prompt bar */}
         <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
@@ -210,7 +238,23 @@ export default function LoadoutShell() {
         </div>
 
         <div style={{ display: "flex", gap: 10, marginTop: 14 }}>
-          <button onClick={() => alert("Save to book — needs the Airtable 'my book' table")} style={{ height: 36, padding: "0 16px", borderRadius: 8, border: "0.5px solid #d6d4cb", background: "#fff", font: "inherit", fontSize: 14, cursor: "pointer" }}>Save to my book</button>
+          <button
+            onClick={() => saveDrink(notes)}
+            disabled={saveStatus === "saving"}
+            style={{
+              height: 36, padding: "0 16px", borderRadius: 8,
+              border: saveStatus === "saved" ? `0.5px solid ${RED}` : "0.5px solid #d6d4cb",
+              background: saveStatus === "saved" ? "rgba(218,40,28,0.06)" : "#fff",
+              color: saveStatus === "error" ? "#A32D2D" : saveStatus === "saved" ? RED : "#2c2c2a",
+              font: "inherit", fontSize: 14, cursor: saveStatus === "saving" ? "default" : "pointer",
+              opacity: saveStatus === "saving" ? 0.6 : 1,
+            }}
+          >
+            {saveStatus === "saving" ? "Saving…"
+              : saveStatus === "saved" ? "Saved to book ✓"
+              : saveStatus === "error" ? "Save failed — retry"
+              : "Save to my book"}
+          </button>
         </div>
 
       </div>

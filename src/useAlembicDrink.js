@@ -52,6 +52,9 @@ export function useAlembicDrink(initialDrink = null) {
   // per-slot swap state: { slot, status: "loading"|"ready"|"error", alternatives, error }
   const [swapState, setSwapState] = useState(null);
 
+  // "my book" save state: idle | saving | saved | error
+  const [saveStatus, setSaveStatus] = useState("idle");
+
   const generate = useCallback(async (prompt, vibe) => {
     if (!prompt?.trim()) return;
     setStatus("generating");
@@ -106,5 +109,22 @@ export function useAlembicDrink(initialDrink = null) {
 
   const cancelSwap = useCallback(() => setSwapState(null), []);
 
-  return { drink, status, error, generate, swap, swapState, applySwap, cancelSwap, setDrink };
+  // Persist the current drink (plus any special-touch notes) to "my book".
+  const saveDrink = useCallback(
+    async (notes) => {
+      if (!drink) return;
+      setSaveStatus("saving");
+      try {
+        const result = await postJSON("book", { drink, notes });
+        setSaveStatus("saved");
+        return result;
+      } catch (e) {
+        setError(e.message);
+        setSaveStatus("error");
+      }
+    },
+    [drink]
+  );
+
+  return { drink, status, error, generate, swap, swapState, applySwap, cancelSwap, setDrink, saveDrink, saveStatus };
 }
