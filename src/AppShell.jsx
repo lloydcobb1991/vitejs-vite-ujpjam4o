@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import Emberwatch from './Emberwatch';
 import IntegrationTracker from './IntegrationTracker';
 import LeadershipDashboard from './LeadershipDashboard';
+import LoadoutShell from './LoadoutShell';
 import ReportTransformer from './ReportTransformer';
 import TheBeacon from './TheBeacon';
 
@@ -47,6 +48,13 @@ const TOOLS = [
     description: 'Track and count menu brand impressions.',
     docsUrl: null,
     component: Emberwatch,
+  },
+  {
+    id: 'alembic',
+    name: 'Alembic',
+    description: 'Build and riff on drink frameworks.',
+    docsUrl: null,
+    component: LoadoutShell,
   },
 ];
 
