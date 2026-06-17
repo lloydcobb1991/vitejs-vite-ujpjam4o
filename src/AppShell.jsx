@@ -43,7 +43,7 @@ const TOOLS = [
   },
   {
     id: 'emberwatch',
-    name: 'Emberwatch',
+    name: 'Fire Watch',
     description: 'Track and count menu brand impressions.',
     docsUrl: null,
     component: Emberwatch,
