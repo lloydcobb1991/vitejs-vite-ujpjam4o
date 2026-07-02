@@ -233,6 +233,7 @@ export default function Emberwatch() {
 
       const filesData = await Promise.all(fileDataPromises);
       const menuAnalyses = [];
+      const failedMenus = [];
 
       for (let i = 0; i < filesData.length; i++) {
         const fileData = filesData[i];
@@ -240,18 +241,40 @@ export default function Emberwatch() {
           `Analyzing ${fileData.name} (${i + 1}/${filesData.length})...`
         );
 
-        const analysis = await analyzeMenuWithClaude(fileData);
-        menuAnalyses.push({
-          location: extractLocation(fileData.name),
-          filename: fileData.name,
-          ...analysis,
-        });
+        // Isolate each menu. A single bad/unparseable response must NOT abort
+        // the whole batch — record the failure and keep going. This is what
+        // prevents "one menu out of 38 kills all 38."
+        try {
+          const analysis = await analyzeMenuWithClaude(fileData);
+          menuAnalyses.push({
+            location: extractLocation(fileData.name),
+            filename: fileData.name,
+            ...analysis,
+          });
+        } catch (menuErr) {
+          console.error(`Failed to analyze ${fileData.name}:`, menuErr);
+          failedMenus.push({
+            filename: fileData.name,
+            location: extractLocation(fileData.name),
+            error: menuErr.message || String(menuErr),
+          });
+        }
+      }
+
+      // Only a total wipeout is a hard error. Any partial success still renders.
+      if (menuAnalyses.length === 0) {
+        throw new Error(
+          `All ${filesData.length} menus failed to analyze. First error: ${
+            failedMenus[0]?.error || 'unknown'
+          }`
+        );
       }
 
       setProgress('Aggregating results...');
       const aggregated = aggregateBySupplier(menuAnalyses);
+      const offApl = aggregateOffApl(menuAnalyses);
 
-      setResults({ menuAnalyses, aggregated });
+      setResults({ menuAnalyses, aggregated, offApl, failedMenus });
       setView('results');
       setProgress('');
     } catch (err) {
@@ -383,9 +406,21 @@ When an APL brand is mentioned on the menu but the rendering is genuinely proble
 
 The distinction: off-APL = out of scope, ignore. APL brand rendered poorly = flag for client awareness.
 
+**SEPARATELY — OFF-APL BRANDS PRESENT (internal review only, NOT billed):**
+In addition to everything above, produce a SEPARATE list of the notable branded products that appear on this menu but are NOT in the APL. This is an awareness list so our team can eyeball what competing / non-APL brands the venue carries. It is completely independent from the impression count.
+
+Hard rules for this list:
+- These do NOT count as impressions. Do NOT add them to brand_impressions.
+- These are NOT compliance issues. Do NOT add them to compliance_issues.
+- Include only NAMED, branded products — proper-noun spirit/beer/wine/liqueur/RTD brands that are not in the APL. Examples on a typical menu: "Ole Smoky Salty Caramel Whiskey", "Don Julio Reposado", "Skrewball Peanut Butter Whiskey", non-APL Seedlip variants (e.g. "Seedlip Grove 42", "Seedlip Garden 108"), "Bulleit" if absent from the APL, competitor beers/wines by name.
+- Do NOT include generic ingredients or non-branded items: juices, "simple syrup", "mint", "lime juice", "egg white", "house-made cinnamon syrup", produce, or category words like "vodka" / "tequila". Only real brand names.
+- List each off-APL brand ONCE, with every place it appears collected in "where".
+
+Return this as an "off_apl_brands" array. If you find none, return an empty array [].
+
 **ALWAYS return the compliance_issues array.** If you genuinely find no compliance issues, return an empty array like "compliance_issues": []. Never omit the field. Always look for issues before declaring there are none — be proactive about finding them.
 
-**RETURN ONLY THIS JSON STRUCTURE - no other fields, no recipe text, no cocktail list:**
+**RETURN ONLY THIS JSON STRUCTURE - these three top-level fields only, no recipe text:**
 \`\`\`json
 {
   "brand_impressions": {
@@ -401,6 +436,13 @@ The distinction: off-APL = out of scope, ignore. APL brand rendered poorly = fla
       "found_text": "Jack",
       "correct_name": "Jack Daniel's Tennessee Whiskey",
       "cocktail": "Cocktail Name"
+    }
+  ],
+  "off_apl_brands": [
+    {
+      "name": "Ole Smoky Salty Caramel Whiskey",
+      "category": "whiskey",
+      "where": ["Ole Skrewball Old Fashioned", "Salty Caramel Whiskey Espresso Martini", "Spirits List"]
     }
   ]
 }
@@ -447,11 +489,11 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
       .map((item) => item.text)
       .join('\n');
 
-    const jsonText = text
-      .replace(/```json\n?/g, '')
-      .replace(/```\n?/g, '')
-      .trim();
-    return JSON.parse(jsonText);
+    // Robust parse. The old code did a single JSON.parse on the whole string,
+    // which throws "unexpected non-whitespace character after JSON data" the
+    // moment the model appends ANY trailing text (a note, a second block, a
+    // stray sentence) after the JSON. parseClaudeJson tolerates that.
+    return parseClaudeJson(text);
   };
 
   const extractLocation = (filename) => {
@@ -541,6 +583,21 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
         ]);
       });
     });
+
+    // Off-APL brands (informational — not billed). Appended as a clearly
+    // separated block so it can't be confused with the impression rows above.
+    if (results.offApl && results.offApl.length > 0) {
+      rows.push([]);
+      rows.push(['NOT IN APL (for review — not billed, not emailed)']);
+      rows.push(['Brand', 'Category', 'Locations', 'Mentions']);
+      results.offApl.forEach((b) => {
+        const locs = Object.entries(b.locations)
+          .map(([loc, c]) => `${loc} (${c})`)
+          .join('; ');
+        // Quote the free-text fields so any stray commas don't break columns.
+        rows.push([`"${b.name}"`, b.category || '', `"${locs}"`, b.total]);
+      });
+    }
 
     const csv = rows.map((row) => row.join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
@@ -1120,6 +1177,54 @@ function ResultsView({ results, onNew, onExport, onOpenEmail }) {
           boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
         }}
       >
+        {results.failedMenus && results.failedMenus.length > 0 && (
+          <div
+            style={{
+              background: '#fff8e6',
+              border: '2px solid #ffab00',
+              borderRadius: '12px',
+              padding: '20px 24px',
+              marginBottom: '32px',
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '10px',
+                marginBottom: '10px',
+                color: '#b26a00',
+                fontWeight: '800',
+                fontSize: '16px',
+              }}
+            >
+              <AlertTriangle size={20} color="#b26a00" />
+              {results.failedMenus.length} menu
+              {results.failedMenus.length > 1 ? 's' : ''} couldn't be analyzed —
+              results below cover the {results.menuAnalyses.length} that
+              succeeded.
+            </div>
+            <div style={{ fontSize: '13px', color: '#7a5200', lineHeight: '1.7' }}>
+              {results.failedMenus.map((f, i) => (
+                <div key={i}>
+                  • <strong>{f.filename}</strong> — {f.error}
+                </div>
+              ))}
+            </div>
+            <div
+              style={{
+                fontSize: '12px',
+                color: '#7a5200',
+                marginTop: '10px',
+                fontStyle: 'italic',
+              }}
+            >
+              Tip: re-run just the failed file(s) on their own to see the raw
+              response, or forward this list to check those menus by hand.
+            </div>
+          </div>
+        )}
+
         <h2
           style={{
             fontSize: '32px',
@@ -1333,6 +1438,104 @@ function ResultsView({ results, onNew, onExport, onOpenEmail }) {
                   </div>
                 )
             )}
+          </div>
+        )}
+        {results.offApl && results.offApl.length > 0 && (
+          <div style={{ marginTop: '50px' }}>
+            <h2
+              style={{
+                fontSize: '32px',
+                fontWeight: '900',
+                marginBottom: '8px',
+                color: '#1a1a1a',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '12px',
+              }}
+            >
+              <FileText size={32} color="#b26a00" />
+              Not in APL ({results.offApl.length})
+            </h2>
+            <p
+              style={{
+                fontSize: '15px',
+                color: '#666',
+                margin: '0 0 24px 0',
+                lineHeight: '1.6',
+              }}
+            >
+              Branded products found on the menus that aren't in the active APL.
+              These are <strong>not counted as impressions</strong> and are{' '}
+              <strong>not emailed to suppliers</strong> — listed here so you can
+              spot-check coverage and see what else each venue carries.
+            </p>
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
+                gap: '16px',
+              }}
+            >
+              {results.offApl.map((b, i) => (
+                <div
+                  key={i}
+                  style={{
+                    background: '#fffdf7',
+                    border: '2px solid #ffe1a6',
+                    borderRadius: '12px',
+                    padding: '18px 20px',
+                  }}
+                >
+                  <div
+                    style={{
+                      fontSize: '16px',
+                      fontWeight: '800',
+                      color: '#1a1a1a',
+                      marginBottom: b.category ? '2px' : '8px',
+                    }}
+                  >
+                    {b.name}
+                  </div>
+                  {b.category && (
+                    <div
+                      style={{
+                        fontSize: '12px',
+                        color: '#b26a00',
+                        fontWeight: '700',
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.5px',
+                        marginBottom: '8px',
+                      }}
+                    >
+                      {b.category}
+                    </div>
+                  )}
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexWrap: 'wrap',
+                      gap: '6px',
+                    }}
+                  >
+                    {Object.entries(b.locations).map(([loc, count]) => (
+                      <span
+                        key={loc}
+                        style={{
+                          fontSize: '12px',
+                          fontWeight: '700',
+                          color: '#7a5200',
+                          background: '#fff3d6',
+                          borderRadius: '20px',
+                          padding: '4px 12px',
+                        }}
+                      >
+                        {loc}: {count}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
         )}
       </div>
@@ -1994,6 +2197,123 @@ function EmailReportView({ results, onBack }) {
         </div>
       </div>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Robust model-JSON parsing. Models sometimes wrap JSON in ```json fences,
+// add a sentence before or after it, or emit more than one block. A naive
+// JSON.parse() throws on ALL of those — most visibly with "unexpected
+// non-whitespace character after JSON data" when there's trailing text. We
+// strip fences, try a clean parse, and if that fails, extract the first
+// balanced { ... } object and parse only that.
+// ---------------------------------------------------------------------------
+
+function parseClaudeJson(rawText) {
+  const stripped = String(rawText || '')
+    .replace(/```json/gi, '')
+    .replace(/```/g, '')
+    .trim();
+
+  // Fast path: already-clean JSON.
+  try {
+    return JSON.parse(stripped);
+  } catch (_) {
+    // fall through to balanced-object extraction
+  }
+
+  const candidate = extractFirstJsonObject(stripped);
+  if (candidate) {
+    // If this still throws, the caller's per-menu try/catch records it as a
+    // failed menu rather than killing the whole batch.
+    return JSON.parse(candidate);
+  }
+
+  const snippet = stripped.slice(0, 200).replace(/\s+/g, ' ');
+  throw new Error(
+    `No parseable JSON object found in model response. Started with: "${snippet}"`
+  );
+}
+
+// Return the substring from the first '{' through its matching '}', tracking
+// string literals and escapes so braces inside strings don't miscount. This is
+// what lets us ignore any prose/second-object that follows the JSON.
+function extractFirstJsonObject(s) {
+  const start = s.indexOf('{');
+  if (start === -1) return null;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = start; i < s.length; i++) {
+    const ch = s[i];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === '\\') {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === '{') {
+      depth++;
+    } else if (ch === '}') {
+      depth--;
+      if (depth === 0) {
+        return s.slice(start, i + 1);
+      }
+    }
+  }
+  return null; // never balanced — response was likely truncated
+}
+
+// ---------------------------------------------------------------------------
+// Aggregate the "off-APL" brands the model flagged across menus. These are
+// brands present on menus that are NOT in the active APL. They are NEVER
+// counted as impressions and NEVER emailed to suppliers — this list exists
+// purely as a manual-review aid ("what else is this venue carrying?").
+// ---------------------------------------------------------------------------
+
+function aggregateOffApl(menuAnalyses) {
+  const map = {}; // lowercased name -> { name, category, locations:{loc:count}, total }
+
+  menuAnalyses.forEach((menu) => {
+    const list = menu.off_apl_brands || menu.off_apl || [];
+    if (!Array.isArray(list)) return;
+
+    list.forEach((entry) => {
+      const name = (
+        typeof entry === 'string' ? entry : entry?.name || ''
+      ).trim();
+      if (!name) return;
+
+      const key = name.toLowerCase();
+      const category =
+        typeof entry === 'object' && entry?.category ? entry.category : '';
+      const hits =
+        typeof entry === 'object' && Array.isArray(entry?.where)
+          ? entry.where.length || 1
+          : 1;
+
+      if (!map[key]) {
+        map[key] = { name, category, locations: {}, total: 0 };
+      }
+      map[key].total += hits;
+      map[key].locations[menu.location] =
+        (map[key].locations[menu.location] || 0) + hits;
+      if (!map[key].category && category) map[key].category = category;
+    });
+  });
+
+  return Object.values(map).sort((a, b) =>
+    a.name.toLowerCase().localeCompare(b.name.toLowerCase())
   );
 }
 
