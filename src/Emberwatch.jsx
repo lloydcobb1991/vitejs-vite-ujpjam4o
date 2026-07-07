@@ -480,7 +480,33 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
     });
 
     if (!response.ok) {
-      throw new Error(`API error: ${response.status}`);
+      // Surface WHY it failed, not just the status. The body is where Anthropic
+      // (or the Railway proxy) explains itself: page limits, size limits,
+      // "prompt is too long", body-parser rejections, etc. Without this we were
+      // throwing away the only useful diagnostic.
+      let detail = '';
+      try {
+        const errText = await response.text();
+        try {
+          const errJson = JSON.parse(errText);
+          detail =
+            errJson?.error?.message ||
+            errJson?.message ||
+            (typeof errJson?.error === 'string' ? errJson.error : '') ||
+            errText;
+        } catch (_) {
+          detail = errText; // not JSON — use raw text (e.g. Express "PayloadTooLargeError")
+        }
+      } catch (_) {
+        // couldn't read body — fall back to bare status
+      }
+      detail = String(detail || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 300);
+      throw new Error(
+        `API error: ${response.status}${detail ? ` — ${detail}` : ''}`
+      );
     }
 
     const data = await response.json();
