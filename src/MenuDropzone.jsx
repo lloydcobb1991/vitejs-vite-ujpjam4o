@@ -1,21 +1,25 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Upload, FileText, X, AlertTriangle } from 'lucide-react';
 
 /**
- * MenuDropzone — drag-and-drop + click-to-browse PDF intake for Emberwatch.
+ * MenuDropzone — drag-and-drop + click-to-browse PDF intake for Fire Watch.
  *
- * Usage (replace your existing <input type="file"> block):
- *   <MenuDropzone files={files} onFilesChange={setFiles} disabled={isAnalyzing} />
+ * Replaces the old inline drop box in UploadView. Fixes three problems with it:
+ *   1. Old code filtered on f.type === 'application/pdf'. Some sources (Outlook
+ *      attachments, network shares, certain file managers) hand the browser an
+ *      empty MIME type, so those PDFs were silently discarded. Now falls back
+ *      to the .pdf extension.
+ *   2. No visual feedback on drag-over. Now highlights.
+ *   3. Dropping OUTSIDE the box made the browser navigate to the PDF, killing
+ *      the session. Now swallowed at the window level.
  *
- * Notes:
- *  - `files` is the same File[] your analyze loop already consumes. Nothing downstream changes.
- *  - Files are APPENDED, not replaced, so the boss can drag in batches of 10 four times.
- *  - Dedupes on name+size so a double-drop doesn't double-bill impressions.
- *  - Flags oversized PDFs BEFORE the run instead of after 40 API calls.
+ * Also appends instead of replaces, dedupes on name+size, and flags oversized
+ * files before the run instead of after 40 API calls.
  */
 
 // Anthropic hard-rejects payloads over 32MB. Base64 inflates ~33%, so the real
-// ceiling for a raw PDF is ~24MB. Warn early at 20MB to leave headroom for the
-// JSON envelope and the Railway proxy body limit.
+// ceiling for a raw PDF is ~24MB. Warn at 20MB to leave headroom for the JSON
+// envelope and the Railway proxy body limit.
 const SOFT_LIMIT = 20 * 1024 * 1024;
 const HARD_LIMIT = 24 * 1024 * 1024;
 
@@ -36,22 +40,22 @@ export default function MenuDropzone({
   maxFiles = 60,
 }) {
   const [isDragging, setIsDragging] = useState(false);
-  const [rejected, setRejected] = useState([]);
+  const [notes, setNotes] = useState([]);
   const dragDepth = useRef(0);
   const inputRef = useRef(null);
 
   const addFiles = useCallback(
     (incoming) => {
       const all = Array.from(incoming || []);
-      const notPdf = all.filter((f) => !isPdf(f)).map((f) => f.name);
+      const notPdf = all.filter((f) => !isPdf(f));
       const pdfs = all.filter(isPdf);
 
       const existing = new Set(files.map(keyOf));
       const fresh = [];
-      const dupes = [];
+      let dupes = 0;
       for (const f of pdfs) {
         if (existing.has(keyOf(f))) {
-          dupes.push(f.name);
+          dupes++;
         } else {
           existing.add(keyOf(f));
           fresh.push(f);
@@ -61,11 +65,16 @@ export default function MenuDropzone({
       const merged = [...files, ...fresh].slice(0, maxFiles);
       const overflow = files.length + fresh.length - merged.length;
 
-      const notes = [];
-      if (notPdf.length) notes.push(`Skipped ${notPdf.length} non-PDF file${notPdf.length > 1 ? 's' : ''}`);
-      if (dupes.length) notes.push(`Skipped ${dupes.length} already in the list`);
-      if (overflow > 0) notes.push(`Skipped ${overflow} over the ${maxFiles}-file cap`);
-      setRejected(notes);
+      const msgs = [];
+      if (notPdf.length)
+        msgs.push(
+          `Skipped ${notPdf.length} non-PDF file${notPdf.length > 1 ? 's' : ''}`
+        );
+      if (dupes)
+        msgs.push(`Skipped ${dupes} already in the list`);
+      if (overflow > 0)
+        msgs.push(`Skipped ${overflow} over the ${maxFiles}-file cap`);
+      setNotes(msgs);
 
       onFilesChange(merged);
     },
@@ -73,13 +82,14 @@ export default function MenuDropzone({
   );
 
   const removeAt = (idx) => onFilesChange(files.filter((_, i) => i !== idx));
+
   const clearAll = () => {
     onFilesChange([]);
-    setRejected([]);
+    setNotes([]);
   };
 
-  // Browser opens dropped PDFs in a new tab unless every dragover is cancelled —
-  // including drops that miss the target.
+  // A drop that MISSES the target makes the browser navigate to the file.
+  // Cancelling at the window level is what prevents losing the session.
   useEffect(() => {
     const swallow = (e) => e.preventDefault();
     window.addEventListener('dragover', swallow);
@@ -104,8 +114,8 @@ export default function MenuDropzone({
     if (!disabled) e.dataTransfer.dropEffect = 'copy';
   };
 
-  // Counter, not a boolean — dragging over a child element fires dragleave on
-  // the parent and the highlight flickers without it.
+  // Counter, not a boolean. Dragging over a CHILD element fires dragleave on
+  // the parent, so a boolean makes the highlight flicker.
   const onDragLeave = (e) => {
     e.preventDefault();
     e.stopPropagation();
@@ -122,143 +132,254 @@ export default function MenuDropzone({
     if (e.dataTransfer?.files?.length) addFiles(e.dataTransfer.files);
   };
 
-  const onKeyDown = (e) => {
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      inputRef.current?.click();
-    }
-  };
-
   const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
   const oversized = files.filter((f) => f.size > SOFT_LIMIT);
+  const anyHard = oversized.some((f) => f.size > HARD_LIMIT);
 
   return (
-    <div className="ew-drop">
-      <style>{`
-        .ew-drop { --ew-red:#da291c; --ew-ember:#ff7a18; --ew-ink:#2b2b29;
-                   --ew-paper:#f5f3ee; --ew-line:#d8d4cb; --ew-muted:#6f6b63;
-                   font-family: inherit; }
-        .ew-drop__zone {
-          border: 2px dashed var(--ew-line); border-radius: 12px;
-          background: var(--ew-paper); padding: 34px 24px; text-align: center;
-          cursor: pointer; transition: border-color .15s, background .15s, transform .15s;
-          outline: none;
-        }
-        .ew-drop__zone:hover:not(.is-disabled) { border-color: var(--ew-ember); }
-        .ew-drop__zone:focus-visible { box-shadow: 0 0 0 3px rgba(255,122,24,.35); }
-        .ew-drop__zone.is-over {
-          border-color: var(--ew-ember); border-style: solid;
-          background: #fff6ed; transform: scale(1.005);
-        }
-        .ew-drop__zone.is-disabled { opacity: .5; cursor: not-allowed; }
-        .ew-drop__head { font-size: 16px; font-weight: 700; color: var(--ew-ink); margin: 0 0 6px; }
-        .ew-drop__sub { font-size: 13px; color: var(--ew-muted); margin: 0; }
-        .ew-drop__link { color: var(--ew-red); text-decoration: underline; }
-        .ew-drop__bar {
-          display:flex; align-items:center; justify-content:space-between;
-          gap:12px; margin: 14px 0 6px; font-size: 13px; color: var(--ew-muted);
-        }
-        .ew-drop__clear {
-          background:none; border:none; color: var(--ew-red); cursor:pointer;
-          font-size:13px; text-decoration: underline; padding:0;
-        }
-        .ew-drop__list { list-style:none; margin:0; padding:0; max-height: 260px; overflow-y:auto;
-                         border:1px solid var(--ew-line); border-radius:8px; }
-        .ew-drop__item {
-          display:flex; align-items:center; gap:10px; padding:8px 12px;
-          border-bottom:1px solid var(--ew-line); font-size:13px; color: var(--ew-ink);
-        }
-        .ew-drop__item:last-child { border-bottom:none; }
-        .ew-drop__name { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-        .ew-drop__size { color: var(--ew-muted); font-variant-numeric: tabular-nums; }
-        .ew-drop__item.is-big .ew-drop__size { color: var(--ew-red); font-weight:600; }
-        .ew-drop__x { background:none; border:none; cursor:pointer; color:var(--ew-muted);
-                      font-size:16px; line-height:1; padding:2px 4px; }
-        .ew-drop__x:hover { color: var(--ew-red); }
-        .ew-drop__note {
-          margin-top:10px; padding:10px 12px; border-radius:8px; font-size:13px;
-          background:#fff7e6; border:1px solid #f0d9a8; color:#7a5a12;
-        }
-        @media (prefers-reduced-motion: reduce) {
-          .ew-drop__zone { transition: none; }
-          .ew-drop__zone.is-over { transform: none; }
-        }
-      `}</style>
-
+    <div style={{ marginBottom: '30px' }}>
+      {/* ---- Drop zone ---- */}
       <div
-        className={`ew-drop__zone${isDragging ? ' is-over' : ''}${disabled ? ' is-disabled' : ''}`}
-        role="button"
-        tabIndex={disabled ? -1 : 0}
-        aria-label="Drop menu PDFs here or press Enter to browse"
         onDragEnter={onDragEnter}
         onDragOver={onDragOver}
         onDragLeave={onDragLeave}
         onDrop={onDrop}
-        onClick={() => !disabled && inputRef.current?.click()}
-        onKeyDown={onKeyDown}
+        style={{
+          border: `3px dashed ${isDragging ? '#ff6b35' : '#da291c'}`,
+          borderStyle: isDragging ? 'solid' : 'dashed',
+          borderRadius: '16px',
+          padding: '60px 40px',
+          textAlign: 'center',
+          background: isDragging ? '#fff5f0' : '#fafafa',
+          transition: 'all 0.2s ease',
+          opacity: disabled ? 0.5 : 1,
+          boxShadow: isDragging
+            ? '0 0 40px rgba(255, 107, 53, 0.35)'
+            : 'none',
+        }}
       >
-        <p className="ew-drop__head">
-          {isDragging ? 'Drop to add menus' : 'Drag menu PDFs here'}
-        </p>
-        <p className="ew-drop__sub">
-          or <span className="ew-drop__link">browse your files</span> — up to {maxFiles} at once
-        </p>
         <input
           ref={inputRef}
           type="file"
-          accept="application/pdf,.pdf"
+          accept=".pdf,application/pdf"
           multiple
           disabled={disabled}
-          style={{ display: 'none' }}
           onChange={(e) => {
             addFiles(e.target.files);
             e.target.value = ''; // lets the same file be re-picked after removal
           }}
+          style={{ display: 'none' }}
         />
+
+        <FileText
+          size={64}
+          color="#da291c"
+          style={{ marginBottom: '24px', opacity: isDragging ? 1 : 0.7 }}
+        />
+
+        <div>
+          <button
+            onClick={() => !disabled && inputRef.current?.click()}
+            disabled={disabled}
+            style={{
+              background: 'linear-gradient(135deg, #da291c 0%, #ff6b35 100%)',
+              color: 'white',
+              border: 'none',
+              padding: '20px 48px',
+              borderRadius: '12px',
+              fontSize: '18px',
+              fontWeight: '800',
+              cursor: disabled ? 'not-allowed' : 'pointer',
+              marginBottom: '24px',
+              boxShadow: '0 8px 24px rgba(218, 41, 28, 0.4)',
+              textTransform: 'uppercase',
+              letterSpacing: '1px',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '12px',
+            }}
+          >
+            <Upload size={20} />
+            Select Menu PDFs
+          </button>
+        </div>
+
+        <p
+          style={{
+            color: isDragging ? '#da291c' : '#999',
+            fontSize: '15px',
+            margin: 0,
+            fontWeight: isDragging ? '800' : '400',
+            textTransform: isDragging ? 'uppercase' : 'none',
+            letterSpacing: isDragging ? '1px' : '0',
+          }}
+        >
+          {isDragging
+            ? 'Drop to add menus'
+            : `or drag and drop files here — up to ${maxFiles} at once`}
+        </p>
       </div>
 
+      {/* ---- File list ---- */}
       {files.length > 0 && (
-        <>
-          <div className="ew-drop__bar">
-            <span>
-              {files.length} menu{files.length === 1 ? '' : 's'} · {fmtSize(totalBytes)}
-            </span>
-            <button type="button" className="ew-drop__clear" onClick={clearAll} disabled={disabled}>
-              Clear all
+        <div
+          style={{
+            background: '#f0f9f4',
+            borderRadius: '12px',
+            padding: '30px',
+            marginTop: '24px',
+            border: '2px solid #28a745',
+          }}
+        >
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: '12px',
+              marginBottom: '20px',
+              flexWrap: 'wrap',
+            }}
+          >
+            <strong style={{ fontSize: '18px', color: '#28a745' }}>
+              {files.length} file{files.length > 1 ? 's' : ''} ready ·{' '}
+              {fmtSize(totalBytes)}
+            </strong>
+            <button
+              onClick={clearAll}
+              disabled={disabled}
+              style={{
+                background: 'transparent',
+                border: '2px solid #ccc',
+                color: '#666',
+                padding: '8px 18px',
+                borderRadius: '8px',
+                fontSize: '12px',
+                fontWeight: '800',
+                cursor: disabled ? 'not-allowed' : 'pointer',
+                textTransform: 'uppercase',
+                letterSpacing: '1px',
+              }}
+            >
+              Clear All
             </button>
           </div>
 
-          <ul className="ew-drop__list">
-            {files.map((f, i) => (
-              <li key={keyOf(f) + i} className={`ew-drop__item${f.size > SOFT_LIMIT ? ' is-big' : ''}`}>
-                <span className="ew-drop__name" title={f.name}>{f.name}</span>
-                <span className="ew-drop__size">{fmtSize(f.size)}</span>
-                <button
-                  type="button"
-                  className="ew-drop__x"
-                  aria-label={`Remove ${f.name}`}
-                  onClick={() => removeAt(i)}
-                  disabled={disabled}
+          <div
+            style={{
+              display: 'grid',
+              gap: '10px',
+              maxHeight: '360px',
+              overflowY: 'auto',
+            }}
+          >
+            {files.map((f, i) => {
+              const big = f.size > SOFT_LIMIT;
+              return (
+                <div
+                  key={keyOf(f) + i}
+                  style={{
+                    background: 'white',
+                    padding: '14px 20px',
+                    borderRadius: '8px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '12px',
+                    border: `2px solid ${big ? '#ffab00' : '#e8e8e8'}`,
+                    fontWeight: '600',
+                    color: '#1a1a1a',
+                  }}
                 >
-                  ×
-                </button>
-              </li>
-            ))}
-          </ul>
-        </>
-      )}
-
-      {oversized.length > 0 && (
-        <div className="ew-drop__note">
-          {oversized.length} file{oversized.length === 1 ? '' : 's'} over {fmtSize(SOFT_LIMIT)}
-          {oversized.some((f) => f.size > HARD_LIMIT)
-            ? ' — the largest will be rejected by the API. Compress before running.'
-            : ' — these are close to the API limit and may fail. Compress if the run errors.'}
+                  <FileText size={18} color="#da291c" style={{ flexShrink: 0 }} />
+                  <span
+                    title={f.name}
+                    style={{
+                      flex: 1,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {f.name}
+                  </span>
+                  <span
+                    style={{
+                      fontSize: '13px',
+                      fontWeight: '800',
+                      color: big ? '#b26a00' : '#999',
+                      flexShrink: 0,
+                    }}
+                  >
+                    {fmtSize(f.size)}
+                  </span>
+                  <button
+                    onClick={() => removeAt(i)}
+                    disabled={disabled}
+                    aria-label={`Remove ${f.name}`}
+                    style={{
+                      background: 'transparent',
+                      border: 'none',
+                      cursor: disabled ? 'not-allowed' : 'pointer',
+                      color: '#999',
+                      padding: '4px',
+                      display: 'flex',
+                      flexShrink: 0,
+                    }}
+                  >
+                    <X size={16} />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
 
-      {rejected.length > 0 && (
-        <div className="ew-drop__note">{rejected.join(' · ')}</div>
+      {/* ---- Oversized warning ---- */}
+      {oversized.length > 0 && (
+        <div
+          style={{
+            marginTop: '16px',
+            padding: '16px 20px',
+            background: '#fff8e6',
+            border: '2px solid #ffab00',
+            borderRadius: '12px',
+            color: '#b26a00',
+            fontSize: '14px',
+            fontWeight: '700',
+            display: 'flex',
+            alignItems: 'flex-start',
+            gap: '12px',
+            lineHeight: '1.6',
+          }}
+        >
+          <AlertTriangle size={20} style={{ flexShrink: 0, marginTop: '2px' }} />
+          <span>
+            {oversized.length} file{oversized.length > 1 ? 's are' : ' is'} over{' '}
+            {fmtSize(SOFT_LIMIT)}
+            {anyHard
+              ? ' — the largest will be rejected by the API. Compress before running.'
+              : ' — close to the API limit and may fail. Compress if the run errors.'}
+          </span>
+        </div>
+      )}
+
+      {/* ---- Skip notes ---- */}
+      {notes.length > 0 && (
+        <div
+          style={{
+            marginTop: '12px',
+            padding: '12px 18px',
+            background: '#fff8e6',
+            border: '1px solid #ffd88a',
+            borderRadius: '8px',
+            color: '#7a5200',
+            fontSize: '13px',
+            fontWeight: '600',
+          }}
+        >
+          {notes.join(' · ')}
+        </div>
       )}
     </div>
   );

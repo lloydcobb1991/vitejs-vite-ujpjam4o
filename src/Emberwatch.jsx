@@ -15,6 +15,7 @@ import {
   Send,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
+import MenuDropzone from './MenuDropzone';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -138,14 +139,12 @@ export default function Emberwatch() {
   const [view, setView] = useState('upload'); // 'upload' | 'results' | 'email'
   const [customApl, setCustomApl] = useState(null); // { name, brands } or null
   const [aplError, setAplError] = useState(null);
-  const fileInputRef = useRef(null);
   const aplInputRef = useRef(null);
 
   // Active APL: custom if uploaded, else built-in.
   const activeApl = customApl || { name: 'Built-in APL', brands: APL_DATA.brands };
 
-  const handleFileUpload = (e) => {
-    const files = Array.from(e.target.files);
+  const handleFilesChange = (files) => {
     setUploadedFiles(files);
     setResults(null);
     setError(null);
@@ -234,6 +233,7 @@ export default function Emberwatch() {
       const filesData = await Promise.all(fileDataPromises);
       const menuAnalyses = [];
       const failedMenus = [];
+      let accountFailure = null;
 
       for (let i = 0; i < filesData.length; i++) {
         const fileData = filesData[i];
@@ -253,12 +253,28 @@ export default function Emberwatch() {
           });
         } catch (menuErr) {
           console.error(`Failed to analyze ${fileData.name}:`, menuErr);
+          const msg = menuErr.message || String(menuErr);
           failedMenus.push({
             filename: fileData.name,
             location: extractLocation(fileData.name),
-            error: menuErr.message || String(menuErr),
+            error: msg,
           });
+          if (msg.startsWith('ACCOUNT:')) {
+            accountFailure = msg.replace('ACCOUNT: ', '');
+            break;
+          }
         }
+      }
+
+      // An account-level abort means the run is INCOMPLETE, not partial.
+      // Fail loudly so nobody emails half a batch as billable impressions.
+      if (accountFailure) {
+        const attempted = menuAnalyses.length + failedMenus.length;
+        throw new Error(
+          `${accountFailure} Stopped after ${attempted} of ${filesData.length} menus — ${
+            filesData.length - attempted
+          } not attempted. Fix the account issue, then re-run the full batch.`
+        );
       }
 
       // Only a total wipeout is a hard error. Any partial success still renders.
@@ -504,6 +520,30 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
         .replace(/\s+/g, ' ')
         .trim()
         .slice(0, 300);
+      // Classify account-level failures separately. These fail EVERY
+      // remaining menu identically, so the batch loop aborts on them rather
+      // than grinding through 39 more calls and reporting 40 vague errors.
+      if (
+        response.status === 401 ||
+        /authentication|invalid x-api-key/i.test(detail)
+      ) {
+        throw new Error(
+          'ACCOUNT: API key rejected (401). Check ANTHROPIC_API_KEY on Railway.'
+        );
+      }
+      if (
+        response.status === 402 ||
+        /credit balance|insufficient|billing|quota|subscription/i.test(detail)
+      ) {
+        throw new Error(
+          `ACCOUNT: Anthropic billing or credit problem — not a menu problem. ${detail}`
+        );
+      }
+      if (response.status === 429) {
+        throw new Error(
+          `ACCOUNT: Rate limited (429). Wait a minute and re-run. ${detail}`
+        );
+      }
       throw new Error(
         `API error: ${response.status}${detail ? ` — ${detail}` : ''}`
       );
@@ -668,18 +708,11 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
           customApl={customApl}
           aplError={aplError}
           aplInputRef={aplInputRef}
-          onPickFiles={() => fileInputRef.current?.click()}
           onPickApl={() => aplInputRef.current?.click()}
           onAplUpload={handleAplUpload}
           onClearApl={clearCustomApl}
-          onFileUpload={handleFileUpload}
-          onDropFiles={(files) => {
-            setUploadedFiles(files);
-            setResults(null);
-            setError(null);
-          }}
+          onFilesChange={handleFilesChange}
           onAnalyze={analyzeMenus}
-          fileInputRef={fileInputRef}
         />
       )}
 
@@ -719,14 +752,11 @@ function UploadView({
   customApl,
   aplError,
   aplInputRef,
-  onPickFiles,
   onPickApl,
   onAplUpload,
   onClearApl,
-  onFileUpload,
-  onDropFiles,
+  onFilesChange,
   onAnalyze,
-  fileInputRef,
 }) {
   return (
     <div style={{ width: '98%', margin: '0 auto', padding: '0 20px' }}>
@@ -890,116 +920,11 @@ function UploadView({
           boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
         }}
       >
-        <div
-          style={{
-            border: '3px dashed #da291c',
-            borderRadius: '16px',
-            padding: '60px 40px',
-            textAlign: 'center',
-            background: '#fafafa',
-            marginBottom: '30px',
-            transition: 'all 0.3s ease',
-          }}
-          onDragOver={(e) => e.preventDefault()}
-          onDrop={(e) => {
-            e.preventDefault();
-            const files = Array.from(e.dataTransfer.files).filter(
-              (f) => f.type === 'application/pdf'
-            );
-            if (files.length) onDropFiles(files);
-          }}
-        >
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".pdf"
-            multiple
-            onChange={onFileUpload}
-            style={{ display: 'none' }}
-          />
-
-          <FileText
-            size={64}
-            color="#da291c"
-            style={{ marginBottom: '24px', opacity: 0.7 }}
-          />
-
-          <button
-            onClick={onPickFiles}
-            style={{
-              background: 'linear-gradient(135deg, #da291c 0%, #ff6b35 100%)',
-              color: 'white',
-              border: 'none',
-              padding: '20px 48px',
-              borderRadius: '12px',
-              fontSize: '18px',
-              fontWeight: '800',
-              cursor: 'pointer',
-              marginBottom: '24px',
-              boxShadow: '0 8px 24px rgba(218, 41, 28, 0.4)',
-              textTransform: 'uppercase',
-              letterSpacing: '1px',
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: '12px',
-            }}
-          >
-            <Upload size={20} />
-            Select Menu PDFs
-          </button>
-
-          <p style={{ color: '#999', fontSize: '15px', margin: 0 }}>
-            or drag and drop files here
-          </p>
-        </div>
-
-        {uploadedFiles.length > 0 && (
-          <div
-            style={{
-              background: '#f0f9f4',
-              borderRadius: '12px',
-              padding: '30px',
-              marginBottom: '30px',
-              border: '2px solid #28a745',
-            }}
-          >
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '12px',
-                marginBottom: '20px',
-              }}
-            >
-              <CheckCircle size={24} color="#28a745" />
-              <strong style={{ fontSize: '18px', color: '#28a745' }}>
-                {uploadedFiles.length} file
-                {uploadedFiles.length > 1 ? 's' : ''} ready
-              </strong>
-            </div>
-            <div style={{ display: 'grid', gap: '10px' }}>
-              {uploadedFiles.map((f, i) => (
-                <div
-                  key={i}
-                  style={{
-                    background: 'white',
-                    padding: '14px 20px',
-                    borderRadius: '8px',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '12px',
-                    border: '2px solid #e8e8e8',
-                    fontWeight: '600',
-                    color: '#1a1a1a',
-                  }}
-                >
-                  <FileText size={18} color="#da291c" />
-                  {f.name}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
+        <MenuDropzone
+          files={uploadedFiles}
+          onFilesChange={onFilesChange}
+          disabled={analyzing}
+        />
 
         <button
           onClick={onAnalyze}
