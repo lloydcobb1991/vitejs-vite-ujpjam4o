@@ -746,6 +746,7 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
       {view === 'email' && results && (
         <EmailReportView
           results={results}
+          activeApl={activeApl}
           onBack={() => setView('results')}
         />
       )}
@@ -1512,8 +1513,10 @@ function ResultsView({ results, onNew, onExport, onOpenEmail }) {
 // Email report view
 // ===========================================================================
 
-function EmailReportView({ results, onBack }) {
-  const [emails, setEmails] = useState(() => buildVenueEmails(results));
+function EmailReportView({ results, activeApl, onBack }) {
+  const [emails, setEmails] = useState(() =>
+    buildVenueEmails(results, activeApl)
+  );
   const [currentIdx, setCurrentIdx] = useState(0);
   const [editing, setEditing] = useState(false);
   const [step, setStep] = useState('review'); // 'review' | 'sending' | 'done'
@@ -2819,7 +2822,19 @@ function parseStructuredXlsxApl(workbook) {
 // than around who supplies it.
 // ---------------------------------------------------------------------------
 
-function buildVenueEmails(results) {
+function buildVenueEmails(results, activeApl) {
+  // A naming note only means something if it points at a real APL brand. The
+  // model sometimes writes prose into correct_name — "Not in APL" being the
+  // common one — which renders as an instruction to the venue rather than a
+  // correction. Falls back to permissive if no APL was passed.
+  const aplNames = new Set(
+    (activeApl?.brands || []).map((b) => String(b.name || '').trim().toLowerCase())
+  );
+  const isRealAplBrand = (name) => {
+    if (aplNames.size === 0) return true;
+    return aplNames.has(String(name || '').trim().toLowerCase());
+  };
+
   const period = new Date().toLocaleDateString('en-US', {
     month: 'long',
     year: 'numeric',
@@ -2907,9 +2922,15 @@ function buildVenueEmails(results) {
     // flags these anyway and then explains, in the note itself, that there's
     // no issue — which reads as incoherent to the recipient.
     const issues = (menu.compliance_issues || []).filter((i) => {
-      const found = String(i.found_text || '').trim().toLowerCase();
-      const correct = String(i.correct_name || '').trim().toLowerCase();
-      return found && correct && found !== correct;
+      const found = String(i.found_text || '').trim();
+      const correct = String(i.correct_name || '').trim();
+      if (!found || !correct) return false;
+      if (found.toLowerCase() === correct.toLowerCase()) return false;
+      // found_text should be a short string lifted off the menu. Anything
+      // longer is the model describing the problem in prose rather than
+      // quoting it, which doesn't render usefully.
+      if (found.length > 45) return false;
+      return isRealAplBrand(correct);
     });
     const complianceBlock = issues.length
       ? `\n\nNAMING NOTES (${issues.length})
