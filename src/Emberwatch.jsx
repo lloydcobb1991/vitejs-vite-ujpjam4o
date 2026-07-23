@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   Upload,
   Download,
@@ -24,39 +24,53 @@ import MenuDropzone from './MenuDropzone';
 // The Railway-hosted backend. Switching this URL is how you swap servers.
 const API_BASE = 'https://emberwatch-api-production.up.railway.app';
 
-// Default email map per supplier. These are EDITABLE in the review screen
-// before sending - this is just the prefill. Add or correct as you learn the
-// real contacts.
-const SUPPLIER_EMAILS = {
-  DIAGEO: 'reports@diageo.com',
-  'PERNOD RICARD': 'reports@pernod-ricard.com',
-  'BEAM SUNTORY': 'reports@beamsuntory.com',
-  CAMPARI: 'reports@campari.com',
-  BACARDI: 'reports@bacardi.com',
-  'MOET HENNESSY': 'reports@moethennessy.com',
-  GALLO: 'reports@gallo.com',
-  'FIFTH GENERATION': 'reports@fifthgeneration.com',
-  'BROWN FORMAN': 'reports@brown-forman.com',
-  'HEAVEN HILL': 'reports@heavenhill.com',
-  'REMY COINTREAU': 'reports@remy-cointreau.com',
-  'WILLIAM GRANT': 'reports@williamgrant.com',
-  SAZERAC: 'reports@sazerac.com',
-  PROXIMO: 'reports@proximospirits.com',
-  'MAISON FERRAND': 'reports@maisonferrand.com',
-  SERRALLES: 'reports@serralles.com',
-  CHOPIN: 'reports@chopinvodka.com',
-  'CASTLE BRANDS/PR': 'reports@castlebrandsinc.com',
-  'AVIATION/DIAGEO': 'reports@aviationgin.com',
-  'CASAMIGOS/DIAGEO': 'reports@casamigos.com',
-  'WOLF SPIRITS': 'reports@wolfspirits.com',
-  'LA GRITONA': 'reports@lagritonatequila.com',
-  BOSSCAL: 'reports@bosscalmezcal.com',
-  TRELLIS: 'reports@trellisspirits.com',
-  TERLATO: 'reports@terlato.com',
-  BRANCA: 'reports@brancausa.com',
-  'FEVER-TREE': 'reports@fever-tree.com',
-  MIONETTO: 'reports@mionetto.com',
-};
+// ---------------------------------------------------------------------------
+// Contacts. Venue-manager addresses live in Airtable and are reached through
+// the Railway API, never directly — an Airtable key in the frontend would ship
+// inside the browser bundle for anyone to read.
+//
+// Every call here degrades silently. If the /api/contacts endpoints aren't
+// deployed yet, the recipient UI still works exactly as normal; it just won't
+// remember addresses between runs.
+// ---------------------------------------------------------------------------
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+const isEmail = (s) => EMAIL_RE.test(String(s || '').trim());
+
+async function fetchContacts() {
+  try {
+    const res = await fetch(`${API_BASE}/api/contacts`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return Array.isArray(data?.contacts) ? data.contacts : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function saveContacts(entries) {
+  if (!entries || entries.length === 0) return;
+  try {
+    await fetch(`${API_BASE}/api/contacts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contacts: entries }),
+    });
+  } catch (_) {
+    // Non-fatal. The emails have already gone out by this point; losing an
+    // address-book entry is a nuisance, not a failure worth alarming anyone
+    // about mid-send.
+  }
+}
+
+// Contacts explicitly associated with a venue.
+function matchContacts(contacts, location) {
+  const loc = String(location || '').trim().toLowerCase();
+  if (!loc) return [];
+  return contacts.filter((c) =>
+    (c.locations || []).some((l) => String(l).trim().toLowerCase() === loc)
+  );
+}
 
 // ---------------------------------------------------------------------------
 // APL Brand Data
@@ -1499,14 +1513,45 @@ function ResultsView({ results, onNew, onExport, onOpenEmail }) {
 // ===========================================================================
 
 function EmailReportView({ results, onBack }) {
-  const [emails, setEmails] = useState(() => buildEmails(results));
+  const [emails, setEmails] = useState(() => buildVenueEmails(results));
   const [currentIdx, setCurrentIdx] = useState(0);
   const [editing, setEditing] = useState(false);
   const [step, setStep] = useState('review'); // 'review' | 'sending' | 'done'
   const [sendError, setSendError] = useState(null);
   const [sendSummary, setSendSummary] = useState(null);
+  const [contacts, setContacts] = useState([]);
+  const [contactsStatus, setContactsStatus] = useState('loading'); // loading | ready | unavailable
+  const [draftAddr, setDraftAddr] = useState('');
+  const [addrError, setAddrError] = useState(null);
 
   const current = emails[currentIdx];
+
+  // Load the saved address book, then prefill each venue with whoever received
+  // that venue's last report. This is the "click once to include" bit - by the
+  // time the review screen renders, the usual recipients are already there.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const list = await fetchContacts();
+      if (cancelled) return;
+      if (!list) {
+        setContactsStatus('unavailable');
+        return;
+      }
+      setContacts(list);
+      setContactsStatus('ready');
+      setEmails((prev) =>
+        prev.map((e) =>
+          e.to.length
+            ? e
+            : { ...e, to: matchContacts(list, e.location).map((c) => c.email) }
+        )
+      );
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const updateField = (field, value) => {
     setEmails((prev) => {
@@ -1516,9 +1561,68 @@ function EmailReportView({ results, onBack }) {
     });
   };
 
-  // Shared send pipeline. `batch` is the array of emails to send.
+  // ----- Recipients -----
+
+  const addRecipient = (raw) => {
+    const clean = String(raw || '').trim().toLowerCase();
+    if (!clean) return;
+    if (!isEmail(clean)) {
+      setAddrError(`"${clean}" doesn't look like an email address.`);
+      return;
+    }
+    setAddrError(null);
+    setEmails((prev) => {
+      const next = [...prev];
+      const cur = next[currentIdx];
+      if (cur.to.includes(clean)) return prev;
+      next[currentIdx] = { ...cur, to: [...cur.to, clean] };
+      return next;
+    });
+    setDraftAddr('');
+  };
+
+  const removeRecipient = (addr) => {
+    setEmails((prev) => {
+      const next = [...prev];
+      const cur = next[currentIdx];
+      next[currentIdx] = { ...cur, to: cur.to.filter((a) => a !== addr) };
+      return next;
+    });
+  };
+
+  // Saved contacts not already on this email, venue matches first.
+  const suggestions = (() => {
+    if (!current) return [];
+    const taken = new Set(current.to);
+    const forVenue = matchContacts(contacts, current.location).filter(
+      (c) => !taken.has(c.email)
+    );
+    const venueEmails = new Set(forVenue.map((c) => c.email));
+    const others = contacts.filter(
+      (c) => !taken.has(c.email) && !venueEmails.has(c.email)
+    );
+    return [...forVenue, ...others].slice(0, 12);
+  })();
+
+  const missingRecipients = emails.filter((e) => e.to.length === 0);
+
+  // ----- Send -----
+
   const doSend = async (batch) => {
     setSendError(null);
+
+    // Guard. A venue with no recipient would either error out at SendGrid or,
+    // worse, silently succeed with nobody on it.
+    const blank = batch.filter((e) => e.to.length === 0);
+    if (blank.length) {
+      setSendError(
+        `${blank.length} venue${
+          blank.length > 1 ? 's have' : ' has'
+        } no recipients: ${blank.map((e) => e.location).join(', ')}`
+      );
+      return;
+    }
+
     setStep('sending');
 
     try {
@@ -1527,10 +1631,14 @@ function EmailReportView({ results, onBack }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           emails: batch.map((e) => ({
-            to: e.to,
+            to: e.to, // now an ARRAY of addresses, not a single string
             subject: e.subject,
             body: e.body,
-            supplier: e.supplier,
+            location: e.location,
+            // Back-compat: the existing Railway handler labels results by
+            // `supplier`. Sending both means the frontend works against the
+            // current backend unchanged.
+            supplier: e.location,
           })),
         }),
       });
@@ -1547,6 +1655,14 @@ function EmailReportView({ results, onBack }) {
         );
       }
       setStep('done');
+
+      // Remember these recipients for next time. Deliberately after the send
+      // and deliberately not awaited into the error path.
+      saveContacts(
+        batch.flatMap((e) =>
+          e.to.map((email) => ({ email, location: e.location }))
+        )
+      );
     } catch (err) {
       console.error('Send failed:', err);
       setSendError(err.message);
@@ -1554,10 +1670,7 @@ function EmailReportView({ results, onBack }) {
     }
   };
 
-  // Send every supplier report.
   const sendAll = () => doSend(emails);
-
-  // Send ONLY the supplier currently being viewed — used for safe testing.
   const sendOne = () => doSend([emails[currentIdx]]);
 
   // ----- Sending screen -----
@@ -1593,17 +1706,14 @@ function EmailReportView({ results, onBack }) {
         >
           Sending Reports
         </h2>
-        <p style={{ color: '#666', fontSize: '18px' }}>
-          Sending {emails.length} supplier{' '}
-          {emails.length === 1 ? 'report' : 'reports'}…
-        </p>
+        <p style={{ color: '#666', fontSize: '18px' }}>Sending to venues…</p>
       </div>
     );
   }
 
   // ----- Done screen -----
   if (step === 'done') {
-    const sent = sendSummary?.sent ?? emails.length;
+    const sent = sendSummary?.sent ?? 0;
     const failed = sendSummary?.failed ?? 0;
     const allOk = failed === 0;
     return (
@@ -1634,13 +1744,7 @@ function EmailReportView({ results, onBack }) {
           >
             {allOk ? 'Reports Sent' : 'Sent with errors'}
           </h2>
-          <p
-            style={{
-              color: '#666',
-              fontSize: '18px',
-              marginBottom: '32px',
-            }}
-          >
+          <p style={{ color: '#666', fontSize: '18px', marginBottom: '32px' }}>
             {sent} sent · {failed} failed
           </p>
 
@@ -1667,11 +1771,22 @@ function EmailReportView({ results, onBack }) {
                     fontWeight: '700',
                   }}
                 >
-                  {r.status === 'sent' ? '✓' : '✗'} {r.supplier} ({r.to})
+                  {r.status === 'sent' ? '✓' : '✗'}{' '}
+                  {r.location || r.supplier}
+                  <div
+                    style={{
+                      color: '#666',
+                      fontWeight: '500',
+                      fontSize: '13px',
+                      marginTop: '4px',
+                    }}
+                  >
+                    {Array.isArray(r.to) ? r.to.join(', ') : r.to}
+                  </div>
                   {r.error && (
                     <div
                       style={{
-                        color: '#666',
+                        color: '#da291c',
                         fontWeight: '500',
                         fontSize: '13px',
                         marginTop: '4px',
@@ -1737,7 +1852,7 @@ function EmailReportView({ results, onBack }) {
                 lineHeight: '1.2',
               }}
             >
-              Review & Send Reports
+              Review &amp; Send Reports
             </h1>
           </div>
           <p
@@ -1748,7 +1863,8 @@ function EmailReportView({ results, onBack }) {
               fontWeight: '600',
             }}
           >
-            {emails.length} supplier reports · review each before sending
+            {emails.length} venue report{emails.length === 1 ? '' : 's'} ·
+            review each before sending
           </p>
         </div>
         <div style={{ display: 'flex', gap: '12px' }}>
@@ -1770,7 +1886,7 @@ function EmailReportView({ results, onBack }) {
           </button>
           <button
             onClick={sendOne}
-            title="Sends only the supplier you're currently viewing — useful for testing to your own inbox"
+            title="Sends only the venue you're currently viewing - useful for testing to your own inbox"
             style={{
               background: 'white',
               color: '#1a1a1a',
@@ -1792,15 +1908,21 @@ function EmailReportView({ results, onBack }) {
           </button>
           <button
             onClick={sendAll}
+            disabled={missingRecipients.length > 0}
+            title={
+              missingRecipients.length > 0
+                ? `${missingRecipients.length} venue(s) still need recipients`
+                : ''
+            }
             style={{
-              background: '#28a745',
+              background: missingRecipients.length > 0 ? '#9bbfa5' : '#28a745',
               color: 'white',
               border: 'none',
               padding: '14px 32px',
               borderRadius: '10px',
               fontSize: '16px',
               fontWeight: '800',
-              cursor: 'pointer',
+              cursor: missingRecipients.length > 0 ? 'not-allowed' : 'pointer',
               textTransform: 'uppercase',
               letterSpacing: '1px',
               display: 'flex',
@@ -1810,7 +1932,7 @@ function EmailReportView({ results, onBack }) {
             }}
           >
             <Send size={18} />
-            Approve & Send All
+            Approve &amp; Send All
           </button>
         </div>
       </div>
@@ -1835,6 +1957,29 @@ function EmailReportView({ results, onBack }) {
         </div>
       )}
 
+      {contactsStatus === 'unavailable' && (
+        <div
+          style={{
+            background: '#fff8e6',
+            border: '2px solid #ffab00',
+            borderRadius: '12px',
+            padding: '16px 24px',
+            marginBottom: '24px',
+            color: '#b26a00',
+            fontWeight: '700',
+            fontSize: '14px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '12px',
+          }}
+        >
+          <AlertTriangle size={18} />
+          Saved contacts aren't available - the address book endpoint isn't
+          responding. You can still type recipients by hand; they just won't be
+          remembered for next time.
+        </div>
+      )}
+
       <div
         style={{
           display: 'grid',
@@ -1842,7 +1987,7 @@ function EmailReportView({ results, onBack }) {
           gap: '24px',
         }}
       >
-        {/* Supplier list */}
+        {/* Venue list */}
         <div
           style={{
             background: 'white',
@@ -1862,44 +2007,58 @@ function EmailReportView({ results, onBack }) {
               margin: '0 0 16px 0',
             }}
           >
-            Suppliers ({emails.length})
+            Venues ({emails.length})
           </h3>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-            {emails.map((e, idx) => (
-              <button
-                key={e.supplier}
-                onClick={() => {
-                  setCurrentIdx(idx);
-                  setEditing(false);
-                }}
-                style={{
-                  background:
-                    currentIdx === idx
+            {emails.map((e, idx) => {
+              const active = currentIdx === idx;
+              const noRecipients = e.to.length === 0;
+              return (
+                <button
+                  key={e.location + idx}
+                  onClick={() => {
+                    setCurrentIdx(idx);
+                    setEditing(false);
+                    setDraftAddr('');
+                    setAddrError(null);
+                  }}
+                  style={{
+                    background: active
                       ? 'linear-gradient(135deg, #da291c 0%, #ff6b35 100%)'
                       : '#fafafa',
-                  color: currentIdx === idx ? 'white' : '#1a1a1a',
-                  border: 'none',
-                  padding: '14px 16px',
-                  borderRadius: '10px',
-                  fontSize: '14px',
-                  fontWeight: '800',
-                  cursor: 'pointer',
-                  textAlign: 'left',
-                }}
-              >
-                <div>{e.supplier}</div>
-                <div
-                  style={{
-                    fontSize: '12px',
-                    opacity: 0.8,
-                    fontWeight: '600',
-                    marginTop: '4px',
+                    color: active ? 'white' : '#1a1a1a',
+                    border: noRecipients
+                      ? '2px solid #ffab00'
+                      : '2px solid transparent',
+                    padding: '14px 16px',
+                    borderRadius: '10px',
+                    fontSize: '14px',
+                    fontWeight: '800',
+                    cursor: 'pointer',
+                    textAlign: 'left',
                   }}
                 >
-                  {e.totalImpressions} impressions
-                </div>
-              </button>
-            ))}
+                  <div>{e.location}</div>
+                  <div
+                    style={{
+                      fontSize: '12px',
+                      opacity: 0.85,
+                      fontWeight: '600',
+                      marginTop: '4px',
+                    }}
+                  >
+                    {e.totalImpressions} impressions ·{' '}
+                    {noRecipients ? (
+                      <span style={{ color: active ? '#fff3d6' : '#b26a00' }}>
+                        no recipients
+                      </span>
+                    ) : (
+                      `${e.to.length} recipient${e.to.length > 1 ? 's' : ''}`
+                    )}
+                  </div>
+                </button>
+              );
+            })}
           </div>
         </div>
 
@@ -1936,13 +2095,22 @@ function EmailReportView({ results, onBack }) {
                 Preview {currentIdx + 1} of {emails.length}
               </div>
               <div
+                style={{ fontSize: '24px', fontWeight: '900', color: '#1a1a1a' }}
+              >
+                {current.location}
+              </div>
+              <div
                 style={{
-                  fontSize: '24px',
-                  fontWeight: '900',
-                  color: '#1a1a1a',
+                  fontSize: '13px',
+                  color: '#666',
+                  fontWeight: '600',
+                  marginTop: '4px',
                 }}
               >
-                {current.supplier}
+                {current.totalImpressions} impressions · {current.brandCount}{' '}
+                brands · {current.issueCount} naming note
+                {current.issueCount === 1 ? '' : 's'} · {current.offAplCount}{' '}
+                off-APL
               </div>
             </div>
             <button
@@ -1967,7 +2135,191 @@ function EmailReportView({ results, onBack }) {
             </button>
           </div>
 
-          {/* To / Subject */}
+          {/* Recipients */}
+          <div
+            style={{
+              background: '#fafafa',
+              padding: '20px',
+              borderRadius: '10px',
+              marginBottom: '20px',
+              border: `2px solid ${
+                current.to.length === 0 ? '#ffab00' : '#f0f0f0'
+              }`,
+            }}
+          >
+            <div
+              style={{
+                fontSize: '12px',
+                color: '#666',
+                fontWeight: '800',
+                textTransform: 'uppercase',
+                marginBottom: '10px',
+              }}
+            >
+              To ({current.to.length})
+            </div>
+
+            {current.to.length > 0 ? (
+              <div
+                style={{
+                  display: 'flex',
+                  flexWrap: 'wrap',
+                  gap: '8px',
+                  marginBottom: '12px',
+                }}
+              >
+                {current.to.map((addr) => (
+                  <span
+                    key={addr}
+                    style={{
+                      background: 'white',
+                      border: '2px solid #da291c',
+                      borderRadius: '30px',
+                      padding: '8px 8px 8px 16px',
+                      fontSize: '14px',
+                      fontWeight: '700',
+                      color: '#1a1a1a',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '8px',
+                    }}
+                  >
+                    {addr}
+                    <button
+                      onClick={() => removeRecipient(addr)}
+                      aria-label={`Remove ${addr}`}
+                      style={{
+                        background: '#f0f0f0',
+                        border: 'none',
+                        borderRadius: '50%',
+                        width: '22px',
+                        height: '22px',
+                        cursor: 'pointer',
+                        color: '#666',
+                        fontSize: '14px',
+                        lineHeight: '1',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                      }}
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <div
+                style={{
+                  fontSize: '14px',
+                  color: '#b26a00',
+                  fontWeight: '700',
+                  marginBottom: '12px',
+                }}
+              >
+                No recipients yet - add at least one below.
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+              <input
+                type="email"
+                value={draftAddr}
+                placeholder="name@venue.com"
+                onChange={(e) => {
+                  setDraftAddr(e.target.value);
+                  if (addrError) setAddrError(null);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    addRecipient(draftAddr);
+                  }
+                }}
+                style={{
+                  flex: 1,
+                  minWidth: '220px',
+                  padding: '10px 12px',
+                  fontSize: '15px',
+                  border: '2px solid #ddd',
+                  borderRadius: '8px',
+                  fontWeight: '600',
+                }}
+              />
+              <button
+                onClick={() => addRecipient(draftAddr)}
+                style={{
+                  background: '#1a1a1a',
+                  color: 'white',
+                  border: 'none',
+                  padding: '10px 22px',
+                  borderRadius: '8px',
+                  fontSize: '14px',
+                  fontWeight: '800',
+                  cursor: 'pointer',
+                  textTransform: 'uppercase',
+                  letterSpacing: '1px',
+                }}
+              >
+                Add
+              </button>
+            </div>
+
+            {addrError && (
+              <div
+                style={{
+                  marginTop: '8px',
+                  fontSize: '13px',
+                  color: '#da291c',
+                  fontWeight: '700',
+                }}
+              >
+                {addrError}
+              </div>
+            )}
+
+            {suggestions.length > 0 && (
+              <div style={{ marginTop: '14px' }}>
+                <div
+                  style={{
+                    fontSize: '11px',
+                    color: '#999',
+                    fontWeight: '800',
+                    textTransform: 'uppercase',
+                    letterSpacing: '1px',
+                    marginBottom: '8px',
+                  }}
+                >
+                  Saved contacts - click to add
+                </div>
+                <div
+                  style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}
+                >
+                  {suggestions.map((c) => (
+                    <button
+                      key={c.email}
+                      onClick={() => addRecipient(c.email)}
+                      title={c.name ? `${c.name} - ${c.email}` : c.email}
+                      style={{
+                        background: 'white',
+                        border: '2px solid #e8e8e8',
+                        borderRadius: '30px',
+                        padding: '8px 16px',
+                        fontSize: '13px',
+                        fontWeight: '700',
+                        color: '#666',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      + {c.name || c.email}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Subject */}
           <div
             style={{
               background: '#fafafa',
@@ -1977,70 +2329,36 @@ function EmailReportView({ results, onBack }) {
               border: '2px solid #f0f0f0',
             }}
           >
-            <div style={{ marginBottom: '14px' }}>
-              <div
-                style={{
-                  fontSize: '12px',
-                  color: '#666',
-                  fontWeight: '800',
-                  textTransform: 'uppercase',
-                  marginBottom: '6px',
-                }}
-              >
-                To
-              </div>
-              {editing ? (
-                <input
-                  type="email"
-                  value={current.to}
-                  onChange={(e) => updateField('to', e.target.value)}
-                  style={{
-                    width: '100%',
-                    padding: '10px 12px',
-                    fontSize: '15px',
-                    border: '2px solid #da291c',
-                    borderRadius: '8px',
-                    fontWeight: '600',
-                  }}
-                />
-              ) : (
-                <div style={{ fontSize: '15px', fontWeight: '700' }}>
-                  {current.to}
-                </div>
-              )}
+            <div
+              style={{
+                fontSize: '12px',
+                color: '#666',
+                fontWeight: '800',
+                textTransform: 'uppercase',
+                marginBottom: '6px',
+              }}
+            >
+              Subject
             </div>
-            <div>
-              <div
+            {editing ? (
+              <input
+                type="text"
+                value={current.subject}
+                onChange={(e) => updateField('subject', e.target.value)}
                 style={{
-                  fontSize: '12px',
-                  color: '#666',
-                  fontWeight: '800',
-                  textTransform: 'uppercase',
-                  marginBottom: '6px',
+                  width: '100%',
+                  padding: '10px 12px',
+                  fontSize: '15px',
+                  border: '2px solid #da291c',
+                  borderRadius: '8px',
+                  fontWeight: '600',
                 }}
-              >
-                Subject
+              />
+            ) : (
+              <div style={{ fontSize: '15px', fontWeight: '700' }}>
+                {current.subject}
               </div>
-              {editing ? (
-                <input
-                  type="text"
-                  value={current.subject}
-                  onChange={(e) => updateField('subject', e.target.value)}
-                  style={{
-                    width: '100%',
-                    padding: '10px 12px',
-                    fontSize: '15px',
-                    border: '2px solid #da291c',
-                    borderRadius: '8px',
-                    fontWeight: '600',
-                  }}
-                />
-              ) : (
-                <div style={{ fontSize: '15px', fontWeight: '700' }}>
-                  {current.subject}
-                </div>
-              )}
-            </div>
+            )}
           </div>
 
           {/* Body */}
@@ -2098,6 +2416,8 @@ function EmailReportView({ results, onBack }) {
               onClick={() => {
                 setCurrentIdx(Math.max(0, currentIdx - 1));
                 setEditing(false);
+                setDraftAddr('');
+                setAddrError(null);
               }}
               disabled={currentIdx === 0}
               style={{
@@ -2122,6 +2442,8 @@ function EmailReportView({ results, onBack }) {
               onClick={() => {
                 setCurrentIdx(Math.min(emails.length - 1, currentIdx + 1));
                 setEditing(false);
+                setDraftAddr('');
+                setAddrError(null);
               }}
               disabled={currentIdx === emails.length - 1}
               style={{
@@ -2489,81 +2811,127 @@ function parseStructuredXlsxApl(workbook) {
 }
 
 // ---------------------------------------------------------------------------
-// Build the per-supplier email list from the aggregated analysis results.
+// Build one email per VENUE from the per-menu analyses.
+//
+// Note this reads results.menuAnalyses (one entry per menu/venue), NOT
+// results.aggregated (one entry per supplier). The recipients are venue
+// managers, so the report is organised around what's on THEIR menu rather
+// than around who supplies it.
 // ---------------------------------------------------------------------------
 
-function buildEmails(results) {
+function buildVenueEmails(results) {
   const period = new Date().toLocaleDateString('en-US', {
     month: 'long',
     year: 'numeric',
   });
+  const stamp = new Date().toLocaleDateString();
 
-  // Map each supplier to their flagged compliance issues, by checking whether
-  // the issue's correct_name is one of that supplier's brands.
-  const supplierBrandNames = {};
-  results.aggregated.forEach((s) => {
-    supplierBrandNames[s.supplier] = new Set(Object.keys(s.brands));
-  });
-  const allIssues = results.menuAnalyses.flatMap((m) =>
-    (m.compliance_issues || []).map((i) => ({ ...i, location: m.location }))
-  );
+  return results.menuAnalyses.map((menu) => {
+    // Group this venue's APL hits by supplier so the list reads in a sensible
+    // order rather than as one long undifferentiated run of brands.
+    const bySupplier = {};
+    let total = 0;
+    Object.entries(menu.brand_impressions || {}).forEach(([brand, data]) => {
+      const sup = String(data.supplier || 'UNKNOWN').trim();
+      const count = data.count || 0;
+      if (!bySupplier[sup]) bySupplier[sup] = [];
+      bySupplier[sup].push({ brand: brand.trim(), count });
+      total += count;
+    });
 
-  return results.aggregated.map((supplier) => {
-    const issuesForSupplier = allIssues.filter((issue) =>
-      supplierBrandNames[supplier.supplier]?.has(issue.correct_name)
+    const supplierNames = Object.keys(bySupplier).sort();
+    const brandCount = supplierNames.reduce(
+      (n, s) => n + bySupplier[s].length,
+      0
     );
 
-    const locationLines = Object.entries(supplier.locations)
-      .map(([loc, count]) => `  • ${loc}: ${count} impressions`)
-      .join('\n');
+    const brandBlock = supplierNames.length
+      ? supplierNames
+          .map((sup) => {
+            const supTotal = bySupplier[sup].reduce((n, r) => n + r.count, 0);
+            const rows = bySupplier[sup]
+              .sort(
+                (a, b) => b.count - a.count || a.brand.localeCompare(b.brand)
+              )
+              .map((r) => `    - ${r.brand}: ${r.count}`)
+              .join('\n');
+            return `  ${sup} (${supTotal})\n${rows}`;
+          })
+          .join('\n\n')
+      : '  No APL brands were detected on this menu.';
 
-    const brandLines = Object.entries(supplier.brands)
-      .map(([brand, count]) => `  • ${brand}: ${count} impressions`)
-      .join('\n');
+    const issues = menu.compliance_issues || [];
+    const complianceBlock = issues.length
+      ? `\n\nNAMING NOTES (${issues.length})
+These brands are on the menu but aren't written as the full product name:
+${issues
+  .map(
+    (i) =>
+      `  ! "${i.found_text}"${
+        i.cocktail ? ` in ${i.cocktail}` : ''
+      } - should read "${i.correct_name}"`
+  )
+  .join('\n')}`
+      : '';
 
-    const compliance =
-      issuesForSupplier.length > 0
-        ? `\n\nCOMPLIANCE NOTES:\n${issuesForSupplier
-            .map(
-              (issue) =>
-                `  ⚠ Found "${issue.found_text}" in ${issue.cocktail} (${issue.location}) — should be "${issue.correct_name}"`
-            )
-            .join(
-              '\n'
-            )}\n\nPlease review these with the venue to ensure proper brand representation.`
-        : '';
+    const offList = menu.off_apl_brands || menu.off_apl || [];
+    const offRows = (Array.isArray(offList) ? offList : [])
+      .map((b) => {
+        const name = String(typeof b === 'string' ? b : b?.name || '').trim();
+        if (!name) return '';
+        const cat =
+          typeof b === 'object' && b?.category ? ` (${b.category})` : '';
+        const where =
+          typeof b === 'object' && Array.isArray(b?.where) && b.where.length
+            ? ` - ${b.where.join(', ')}`
+            : '';
+        return `  - ${name}${cat}${where}`;
+      })
+      .filter(Boolean);
 
-    const body = `Dear ${supplier.supplier} team,
+    const offBlock = offRows.length
+      ? `\n\nNOT ON THE APL (${offRows.length})
+Branded products on this menu that aren't part of the current APL. Listed for
+awareness only - these are not counted as impressions:
+${offRows.join('\n')}`
+      : '';
 
-Please find your APL impression report for ${period}.
+    const body = `Hi there,
+
+Here is the menu report for ${menu.location} - ${period}.
 
 SUMMARY
-Total impressions: ${supplier.total}
+  Total APL impressions: ${total}
+  APL brands present: ${brandCount}
+  Suppliers represented: ${supplierNames.length}
 
-BY LOCATION:
-${locationLines}
+APL BRAND IMPRESSIONS
+${brandBlock}${complianceBlock}${offBlock}
 
-BY BRAND:
-${brandLines}${compliance}
+Every appearance of an APL brand counts as one impression - recipe ingredients,
+spirits lists, cocktail titles, and brands visible in menu photography are each
+counted separately.
 
-This report reflects all detected mentions of your brands across our menu analysis for the period.
-
-If you have any questions, please reply directly to this email.
+If anything above looks wrong, reply to this email and we'll take another look.
 
 Best regards,
 The Ignite Team
 
-—
-Generated by Fire Watch - Ignite Creative Services LLC · ${new Date().toLocaleDateString()}`;
+--
+Generated by Fire Watch - Ignite Creative Services LLC - ${stamp}
+Source menu: ${menu.filename}`;
 
     return {
-      supplier: supplier.supplier,
-      to:
-        SUPPLIER_EMAILS[supplier.supplier] ||
-        `reports@${supplier.supplier.toLowerCase().replace(/[^a-z0-9]/g, '')}.com`,
-      subject: `APL Impression Report — ${period}`,
+      location: menu.location,
+      filename: menu.filename,
+      to: [],
+      subject: `Menu Report - ${menu.location} - ${period}`,
       body,
-      totalImpressions: supplier.total,
+      totalImpressions: total,
+      brandCount,
+      supplierCount: supplierNames.length,
+      issueCount: issues.length,
+      offAplCount: offRows.length,
     };
   });
 }
