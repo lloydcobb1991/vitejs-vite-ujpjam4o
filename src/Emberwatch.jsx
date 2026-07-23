@@ -1022,6 +1022,49 @@ function ResultsView({ results, onNew, onExport, onOpenEmail }) {
     ...new Set(results.aggregated.flatMap((s) => Object.keys(s.brands))),
   ];
 
+  // Records a decision so this finding doesn't resurface next run. Optimistic:
+  // the card updates immediately and rolls back only if the write fails.
+  const reviewEvent = async (event, status) => {
+    setNews((prev) =>
+      prev
+        ? {
+            ...prev,
+            events: prev.events.map((e) =>
+              e.brand === event.brand && e.source_url === event.source_url
+                ? { ...e, status }
+                : e
+            ),
+          }
+        : prev
+    );
+    try {
+      const res = await fetch(`${API_BASE}/api/brand-news/review`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ event, status }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `Server error: ${res.status}`);
+      }
+    } catch (err) {
+      console.error('Review failed:', err);
+      setNewsError(`Couldn't save that decision: ${err.message}`);
+      setNews((prev) =>
+        prev
+          ? {
+              ...prev,
+              events: prev.events.map((e) =>
+                e.brand === event.brand && e.source_url === event.source_url
+                  ? { ...e, status: 'new' }
+                  : e
+              ),
+            }
+          : prev
+      );
+    }
+  };
+
   const checkBrandNews = async () => {
     setNewsStatus('loading');
     setNewsError(null);
@@ -1031,7 +1074,19 @@ function ResultsView({ results, onNew, onExport, onOpenEmail }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ brands: brandsInBatch }),
       });
-      const data = await res.json();
+      // A 404 from Express returns an HTML error page, which blows up
+      // res.json() with an unhelpful "Unexpected token '<'".
+      const raw = await res.text();
+      let data;
+      try {
+        data = JSON.parse(raw);
+      } catch (_) {
+        throw new Error(
+          res.status === 404
+            ? 'Endpoint not found — is brand-news.js mounted in server.js?'
+            : `Server returned ${res.status} (not JSON)`
+        );
+      }
       if (!res.ok) throw new Error(data.error || `Server error: ${res.status}`);
       setNews(data);
       setNewsStatus('done');
@@ -1316,9 +1371,13 @@ function ResultsView({ results, onNew, onExport, onOpenEmail }) {
               }}
             >
               {news.checked} brands checked
-              {news.cached > 0 && ` (${news.cached} from cache)`}. Nothing here
-              changes the APL \u2014 verify each against its source, then update
-              the supplier mapping by hand if it holds up.
+              {news.cached > 0 && `, ${news.cached} from cache`}
+              {news.suppressed > 0 &&
+                `, ${news.suppressed} already reviewed and hidden`}
+              . Nothing here changes the APL — verify each against its
+              source, then update the supplier mapping by hand if it holds up.
+              {news.registryError &&
+                ' (Review history unavailable — decisions may not stick.)'}
             </p>
 
             {news.events.length === 0 ? (
@@ -1422,23 +1481,85 @@ function ResultsView({ results, onNew, onExport, onOpenEmail }) {
                           marginBottom: '10px',
                         }}
                       >
-                        {e.from || 'Unknown'} \u2192 {e.to || 'Unknown'}
+                        {e.from || 'Unknown'} → {e.to || 'Unknown'}
                       </div>
                     )}
 
-                    <a
-                      href={e.source_url}
-                      target="_blank"
-                      rel="noopener noreferrer"
+                    <div
                       style={{
-                        fontSize: '13px',
-                        color: '#da291c',
-                        fontWeight: '700',
-                        textDecoration: 'underline',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '12px',
+                        flexWrap: 'wrap',
                       }}
                     >
-                      Verify at source
-                    </a>
+                      <a
+                        href={e.source_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{
+                          fontSize: '13px',
+                          color: '#da291c',
+                          fontWeight: '700',
+                          textDecoration: 'underline',
+                        }}
+                      >
+                        Verify at source
+                      </a>
+                      <span style={{ flex: 1 }} />
+                      {e.status === 'confirmed' || e.status === 'dismissed' ? (
+                        <span
+                          style={{
+                            fontSize: '12px',
+                            fontWeight: '800',
+                            textTransform: 'uppercase',
+                            letterSpacing: '1px',
+                            color: e.status === 'confirmed' ? '#28a745' : '#999',
+                          }}
+                        >
+                          {e.status} — won't reappear
+                        </span>
+                      ) : (
+                        <>
+                          <button
+                            onClick={() => reviewEvent(e, 'confirmed')}
+                            title="Real change. Update the APL supplier mapping by hand."
+                            style={{
+                              background: '#28a745',
+                              color: 'white',
+                              border: 'none',
+                              padding: '8px 18px',
+                              borderRadius: '8px',
+                              fontSize: '12px',
+                              fontWeight: '800',
+                              cursor: 'pointer',
+                              textTransform: 'uppercase',
+                              letterSpacing: '1px',
+                            }}
+                          >
+                            Confirm
+                          </button>
+                          <button
+                            onClick={() => reviewEvent(e, 'dismissed')}
+                            title="Not relevant. Won't be shown again."
+                            style={{
+                              background: 'transparent',
+                              color: '#666',
+                              border: '2px solid #ddd',
+                              padding: '6px 18px',
+                              borderRadius: '8px',
+                              fontSize: '12px',
+                              fontWeight: '800',
+                              cursor: 'pointer',
+                              textTransform: 'uppercase',
+                              letterSpacing: '1px',
+                            }}
+                          >
+                            Dismiss
+                          </button>
+                        </>
+                      )}
+                    </div>
                   </div>
                 ))}
               </div>
