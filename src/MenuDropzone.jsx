@@ -4,7 +4,7 @@ import { Upload, FileText, X, AlertTriangle } from 'lucide-react';
 /**
  * MenuDropzone — drag-and-drop + click-to-browse PDF intake for Fire Watch.
  *
- * Replaces the old inline drop box in UploadView. Fixes three problems with it:
+ * Fixes over the original inline drop box in UploadView:
  *   1. Old code filtered on f.type === 'application/pdf'. Some sources (Outlook
  *      attachments, network shares, certain file managers) hand the browser an
  *      empty MIME type, so those PDFs were silently discarded. Now falls back
@@ -23,6 +23,11 @@ import { Upload, FileText, X, AlertTriangle } from 'lucide-react';
 const SOFT_LIMIT = 20 * 1024 * 1024;
 const HARD_LIMIT = 24 * 1024 * 1024;
 
+// How long after the last dragover event before we drop the highlight. Browsers
+// fire dragover every ~50-100ms while the cursor is over the target, so this
+// just needs to outlast that gap.
+const DRAG_IDLE_MS = 160;
+
 const fmtSize = (bytes) => {
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
@@ -33,6 +38,13 @@ const isPdf = (file) =>
 
 const keyOf = (file) => `${file.name}::${file.size}`;
 
+// Only highlight for an actual file drag — not selected text or a dragged link.
+const draggingFiles = (e) => {
+  const types = e.dataTransfer?.types;
+  if (!types) return true; // some browsers withhold this; assume yes
+  return Array.from(types).includes('Files');
+};
+
 export default function MenuDropzone({
   files = [],
   onFilesChange,
@@ -41,8 +53,29 @@ export default function MenuDropzone({
 }) {
   const [isDragging, setIsDragging] = useState(false);
   const [notes, setNotes] = useState([]);
-  const dragDepth = useRef(0);
+  const idleTimer = useRef(null);
   const inputRef = useRef(null);
+
+  // Highlight is driven by dragover, which fires CONTINUOUSLY while the cursor
+  // is over the target, then cleared on a short idle timer. The obvious
+  // alternative — counting dragenter/dragleave pairs — breaks whenever those
+  // events don't balance across child elements, which is easy to hit with an
+  // icon + button + text inside the zone.
+  const keepAlive = useCallback(() => {
+    setIsDragging(true);
+    if (idleTimer.current) clearTimeout(idleTimer.current);
+    idleTimer.current = setTimeout(() => setIsDragging(false), DRAG_IDLE_MS);
+  }, []);
+
+  const endDrag = useCallback(() => {
+    if (idleTimer.current) clearTimeout(idleTimer.current);
+    idleTimer.current = null;
+    setIsDragging(false);
+  }, []);
+
+  useEffect(() => () => {
+    if (idleTimer.current) clearTimeout(idleTimer.current);
+  }, []);
 
   const addFiles = useCallback(
     (incoming) => {
@@ -70,8 +103,7 @@ export default function MenuDropzone({
         msgs.push(
           `Skipped ${notPdf.length} non-PDF file${notPdf.length > 1 ? 's' : ''}`
         );
-      if (dupes)
-        msgs.push(`Skipped ${dupes} already in the list`);
+      if (dupes) msgs.push(`Skipped ${dupes} already in the list`);
       if (overflow > 0)
         msgs.push(`Skipped ${overflow} over the ${maxFiles}-file cap`);
       setNotes(msgs);
@@ -102,32 +134,21 @@ export default function MenuDropzone({
 
   const onDragEnter = (e) => {
     e.preventDefault();
-    e.stopPropagation();
-    if (disabled) return;
-    dragDepth.current += 1;
-    setIsDragging(true);
+    if (disabled || !draggingFiles(e)) return;
+    keepAlive();
   };
 
   const onDragOver = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (!disabled) e.dataTransfer.dropEffect = 'copy';
-  };
-
-  // Counter, not a boolean. Dragging over a CHILD element fires dragleave on
-  // the parent, so a boolean makes the highlight flicker.
-  const onDragLeave = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    dragDepth.current = Math.max(0, dragDepth.current - 1);
-    if (dragDepth.current === 0) setIsDragging(false);
+    e.preventDefault(); // required, or the drop event never fires
+    if (disabled || !draggingFiles(e)) return;
+    e.dataTransfer.dropEffect = 'copy';
+    keepAlive();
   };
 
   const onDrop = (e) => {
     e.preventDefault();
     e.stopPropagation();
-    dragDepth.current = 0;
-    setIsDragging(false);
+    endDrag();
     if (disabled) return;
     if (e.dataTransfer?.files?.length) addFiles(e.dataTransfer.files);
   };
@@ -142,20 +163,19 @@ export default function MenuDropzone({
       <div
         onDragEnter={onDragEnter}
         onDragOver={onDragOver}
-        onDragLeave={onDragLeave}
+        onDragLeave={endDrag}
         onDrop={onDrop}
         style={{
-          border: `3px dashed ${isDragging ? '#ff6b35' : '#da291c'}`,
-          borderStyle: isDragging ? 'solid' : 'dashed',
+          border: `3px ${isDragging ? 'solid' : 'dashed'} ${
+            isDragging ? '#ff6b35' : '#da291c'
+          }`,
           borderRadius: '16px',
           padding: '60px 40px',
           textAlign: 'center',
-          background: isDragging ? '#fff5f0' : '#fafafa',
-          transition: 'all 0.2s ease',
+          background: isDragging ? '#fff0e6' : '#fafafa',
+          transition: 'background 0.15s ease, border-color 0.15s ease',
           opacity: disabled ? 0.5 : 1,
-          boxShadow: isDragging
-            ? '0 0 40px rgba(255, 107, 53, 0.35)'
-            : 'none',
+          boxShadow: isDragging ? '0 0 0 6px rgba(255,107,53,0.18)' : 'none',
         }}
       >
         <input
@@ -171,53 +191,60 @@ export default function MenuDropzone({
           style={{ display: 'none' }}
         />
 
-        <FileText
-          size={64}
-          color="#da291c"
-          style={{ marginBottom: '24px', opacity: isDragging ? 1 : 0.7 }}
-        />
+        {/* Children are pointer-events:none so drag events always land on the
+            container itself rather than bubbling up from a child. Keeps the
+            highlight steady while moving across the icon and text. The button
+            re-enables them for itself. */}
+        <div style={{ pointerEvents: 'none' }}>
+          <FileText
+            size={64}
+            color={isDragging ? '#ff6b35' : '#da291c'}
+            style={{ marginBottom: '24px', opacity: isDragging ? 1 : 0.7 }}
+          />
 
-        <div>
-          <button
-            onClick={() => !disabled && inputRef.current?.click()}
-            disabled={disabled}
+          <div>
+            <button
+              onClick={() => !disabled && inputRef.current?.click()}
+              disabled={disabled}
+              style={{
+                background: 'linear-gradient(135deg, #da291c 0%, #ff6b35 100%)',
+                color: 'white',
+                border: 'none',
+                padding: '20px 48px',
+                borderRadius: '12px',
+                fontSize: '18px',
+                fontWeight: '800',
+                cursor: disabled ? 'not-allowed' : 'pointer',
+                marginBottom: '24px',
+                boxShadow: '0 8px 24px rgba(218, 41, 28, 0.4)',
+                textTransform: 'uppercase',
+                letterSpacing: '1px',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '12px',
+                pointerEvents: disabled ? 'none' : 'auto',
+              }}
+            >
+              <Upload size={20} />
+              Select Menu PDFs
+            </button>
+          </div>
+
+          <p
             style={{
-              background: 'linear-gradient(135deg, #da291c 0%, #ff6b35 100%)',
-              color: 'white',
-              border: 'none',
-              padding: '20px 48px',
-              borderRadius: '12px',
-              fontSize: '18px',
-              fontWeight: '800',
-              cursor: disabled ? 'not-allowed' : 'pointer',
-              marginBottom: '24px',
-              boxShadow: '0 8px 24px rgba(218, 41, 28, 0.4)',
-              textTransform: 'uppercase',
-              letterSpacing: '1px',
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: '12px',
+              color: isDragging ? '#da291c' : '#999',
+              fontSize: '15px',
+              margin: 0,
+              fontWeight: isDragging ? '800' : '400',
+              textTransform: isDragging ? 'uppercase' : 'none',
+              letterSpacing: isDragging ? '1px' : '0',
             }}
           >
-            <Upload size={20} />
-            Select Menu PDFs
-          </button>
+            {isDragging
+              ? 'Drop to add menus'
+              : `or drag and drop files here — up to ${maxFiles} at once`}
+          </p>
         </div>
-
-        <p
-          style={{
-            color: isDragging ? '#da291c' : '#999',
-            fontSize: '15px',
-            margin: 0,
-            fontWeight: isDragging ? '800' : '400',
-            textTransform: isDragging ? 'uppercase' : 'none',
-            letterSpacing: isDragging ? '1px' : '0',
-          }}
-        >
-          {isDragging
-            ? 'Drop to add menus'
-            : `or drag and drop files here — up to ${maxFiles} at once`}
-        </p>
       </div>
 
       {/* ---- File list ---- */}
