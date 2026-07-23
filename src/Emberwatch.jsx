@@ -2826,6 +2826,40 @@ function buildVenueEmails(results) {
   });
   const stamp = new Date().toLocaleDateString();
 
+  // The model tags each mention with its source — "(image)", "(image text)",
+  // "(title)" — so one drink can appear three times for the same brand. Strip
+  // the tags and dedupe so the list under each brand stays short.
+  const MAX_CONTEXTS = 6;
+  const summariseCocktails = (list) => {
+    const seen = new Set();
+    const out = [];
+    for (const raw of Array.isArray(list) ? list : []) {
+      const name = String(raw || '')
+        .replace(/\s*\([^)]*\)\s*$/, '')
+        .trim();
+      if (!name) continue;
+      const key = name.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(name);
+    }
+    if (out.length === 0) return '';
+    if (out.length <= MAX_CONTEXTS) return out.join(', ');
+    return `${out.slice(0, MAX_CONTEXTS).join(', ')} +${
+      out.length - MAX_CONTEXTS
+    } more`;
+  };
+
+  // The `cocktail` field is meant to hold a drink name, but the model
+  // sometimes writes a paragraph of its own reasoning into it. Keep the first
+  // clause and cap the length so an essay can't end up in a customer email.
+  const cleanContext = (raw) => {
+    const s = String(raw || '').trim();
+    if (!s) return '';
+    const first = s.split(/\s[—–-]\s|;|\.\s/)[0].trim();
+    return first.length > 60 ? `${first.slice(0, 57)}...` : first;
+  };
+
   return results.menuAnalyses.map((menu) => {
     // Group this venue's APL hits by supplier so the list reads in a sensible
     // order rather than as one long undifferentiated run of brands.
@@ -2835,7 +2869,11 @@ function buildVenueEmails(results) {
       const sup = String(data.supplier || 'UNKNOWN').trim();
       const count = data.count || 0;
       if (!bySupplier[sup]) bySupplier[sup] = [];
-      bySupplier[sup].push({ brand: brand.trim(), count });
+      bySupplier[sup].push({
+        brand: brand.trim(),
+        count,
+        cocktails: data.cocktails || [],
+      });
       total += count;
     });
 
@@ -2853,24 +2891,36 @@ function buildVenueEmails(results) {
               .sort(
                 (a, b) => b.count - a.count || a.brand.localeCompare(b.brand)
               )
-              .map((r) => `    - ${r.brand}: ${r.count}`)
+              .map((r) => {
+                const where = summariseCocktails(r.cocktails);
+                return where
+                  ? `    - ${r.brand}: ${r.count}\n        ${where}`
+                  : `    - ${r.brand}: ${r.count}`;
+              })
               .join('\n');
             return `  ${sup} (${supTotal})\n${rows}`;
           })
           .join('\n\n')
       : '  No APL brands were detected on this menu.';
 
-    const issues = menu.compliance_issues || [];
+    // Drop notes where the menu already matches the APL exactly. The model
+    // flags these anyway and then explains, in the note itself, that there's
+    // no issue — which reads as incoherent to the recipient.
+    const issues = (menu.compliance_issues || []).filter((i) => {
+      const found = String(i.found_text || '').trim().toLowerCase();
+      const correct = String(i.correct_name || '').trim().toLowerCase();
+      return found && correct && found !== correct;
+    });
     const complianceBlock = issues.length
       ? `\n\nNAMING NOTES (${issues.length})
 These brands are on the menu but aren't written as the full product name:
 ${issues
-  .map(
-    (i) =>
-      `  ! "${i.found_text}"${
-        i.cocktail ? ` in ${i.cocktail}` : ''
-      } - should read "${i.correct_name}"`
-  )
+  .map((i) => {
+    const where = cleanContext(i.cocktail);
+    return `  ! "${i.found_text}"${
+      where ? ` in ${where}` : ''
+    } - should read "${i.correct_name}"`;
+  })
   .join('\n')}`
       : '';
 
