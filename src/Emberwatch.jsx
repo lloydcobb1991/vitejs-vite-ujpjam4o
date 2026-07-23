@@ -733,6 +733,7 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
       {view === 'results' && results && (
         <ResultsView
           results={results}
+          activeApl={activeApl}
           onNew={() => {
             setResults(null);
             setUploadedFiles([]);
@@ -1007,14 +1008,59 @@ function UploadView({
   );
 }
 
+// ---------------------------------------------------------------------------
+// Compliance-note hygiene, shared by the results screen and the email builder
+// so the two can't drift apart.
+//
+// The model reliably produces three kinds of junk note: ones where the menu
+// already matches the APL exactly (and the note itself says so), ones where
+// correct_name is prose like "Not in APL" rather than a brand, and ones where
+// found_text is a paragraph of reasoning instead of the string on the menu.
+// None of them survive here.
+// ---------------------------------------------------------------------------
+
+function filterIssues(issues, activeApl) {
+  const aplNames = new Set(
+    (activeApl?.brands || []).map((b) =>
+      String(b.name || '').trim().toLowerCase()
+    )
+  );
+  const isRealAplBrand = (name) =>
+    aplNames.size === 0 ||
+    aplNames.has(String(name || '').trim().toLowerCase());
+
+  return (issues || []).filter((i) => {
+    const found = String(i.found_text || '').trim();
+    const correct = String(i.correct_name || '').trim();
+    if (!found || !correct) return false;
+    if (found.toLowerCase() === correct.toLowerCase()) return false;
+    if (found.length > 45) return false;
+    return isRealAplBrand(correct);
+  });
+}
+
+// The cocktail field should hold a drink name. When it holds an explanation,
+// keep the first clause and cap it.
+function cleanIssueContext(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  const first = s.split(/\s[\u2014\u2013-]\s|;|\.\s/)[0].trim();
+  return first.length > 60 ? `${first.slice(0, 57)}...` : first;
+}
+
 // ===========================================================================
 // Results view
 // ===========================================================================
 
-function ResultsView({ results, onNew, onExport, onOpenEmail }) {
+function ResultsView({ results, activeApl, onNew, onExport, onOpenEmail }) {
   const [newsStatus, setNewsStatus] = useState('idle'); // idle|loading|done|error
   const [news, setNews] = useState(null);
   const [newsError, setNewsError] = useState(null);
+
+  // Same filtering the emails get, so what's on screen matches what goes out.
+  const menusWithIssues = results.menuAnalyses
+    .map((menu) => ({ menu, issues: filterIssues(menu.compliance_issues, activeApl) }))
+    .filter((x) => x.issues.length > 0);
 
   // Every APL brand that turned up in this batch. Checking only what's on
   // these menus keeps the search count proportional to the run.
@@ -1714,7 +1760,7 @@ function ResultsView({ results, onNew, onExport, onOpenEmail }) {
           ))}
         </div>
 
-        {results.menuAnalyses.some((m) => m.compliance_issues?.length > 0) && (
+        {menusWithIssues.length > 0 && (
           <div style={{ marginTop: '50px' }}>
             <h2
               style={{
@@ -1730,9 +1776,8 @@ function ResultsView({ results, onNew, onExport, onOpenEmail }) {
               <AlertTriangle size={32} />
               Compliance Issues
             </h2>
-            {results.menuAnalyses.map(
-              (menu, idx) =>
-                menu.compliance_issues?.length > 0 && (
+            {menusWithIssues.map(
+              ({ menu, issues }, idx) => (
                   <div key={idx} style={{ marginBottom: '30px' }}>
                     <h3
                       style={{
@@ -1744,7 +1789,7 @@ function ResultsView({ results, onNew, onExport, onOpenEmail }) {
                     >
                       📍 {menu.location}
                     </h3>
-                    {menu.compliance_issues.map((issue, i) => (
+                    {issues.map((issue, i) => (
                       <div
                         key={i}
                         style={{
@@ -1779,8 +1824,13 @@ function ResultsView({ results, onNew, onExport, onOpenEmail }) {
                           }}
                         >
                           <div>
-                            Found: "<strong>{issue.found_text}</strong>" in{' '}
-                            <em>{issue.cocktail}</em>
+                            Found: "<strong>{issue.found_text}</strong>"
+                            {cleanIssueContext(issue.cocktail) && (
+                              <>
+                                {' '}
+                                in <em>{cleanIssueContext(issue.cocktail)}</em>
+                              </>
+                            )}
                           </div>
                           <div style={{ marginTop: '6px' }}>
                             Should be: "
@@ -3214,18 +3264,6 @@ function parseStructuredXlsxApl(workbook) {
 // ---------------------------------------------------------------------------
 
 function buildVenueEmails(results, activeApl) {
-  // A naming note only means something if it points at a real APL brand. The
-  // model sometimes writes prose into correct_name — "Not in APL" being the
-  // common one — which renders as an instruction to the venue rather than a
-  // correction. Falls back to permissive if no APL was passed.
-  const aplNames = new Set(
-    (activeApl?.brands || []).map((b) => String(b.name || '').trim().toLowerCase())
-  );
-  const isRealAplBrand = (name) => {
-    if (aplNames.size === 0) return true;
-    return aplNames.has(String(name || '').trim().toLowerCase());
-  };
-
   const period = new Date().toLocaleDateString('en-US', {
     month: 'long',
     year: 'numeric',
@@ -3254,16 +3292,6 @@ function buildVenueEmails(results, activeApl) {
     return `${out.slice(0, MAX_CONTEXTS).join(', ')} +${
       out.length - MAX_CONTEXTS
     } more`;
-  };
-
-  // The `cocktail` field is meant to hold a drink name, but the model
-  // sometimes writes a paragraph of its own reasoning into it. Keep the first
-  // clause and cap the length so an essay can't end up in a customer email.
-  const cleanContext = (raw) => {
-    const s = String(raw || '').trim();
-    if (!s) return '';
-    const first = s.split(/\s[—–-]\s|;|\.\s/)[0].trim();
-    return first.length > 60 ? `${first.slice(0, 57)}...` : first;
   };
 
   return results.menuAnalyses.map((menu) => {
@@ -3312,23 +3340,13 @@ function buildVenueEmails(results, activeApl) {
     // Drop notes where the menu already matches the APL exactly. The model
     // flags these anyway and then explains, in the note itself, that there's
     // no issue — which reads as incoherent to the recipient.
-    const issues = (menu.compliance_issues || []).filter((i) => {
-      const found = String(i.found_text || '').trim();
-      const correct = String(i.correct_name || '').trim();
-      if (!found || !correct) return false;
-      if (found.toLowerCase() === correct.toLowerCase()) return false;
-      // found_text should be a short string lifted off the menu. Anything
-      // longer is the model describing the problem in prose rather than
-      // quoting it, which doesn't render usefully.
-      if (found.length > 45) return false;
-      return isRealAplBrand(correct);
-    });
+    const issues = filterIssues(menu.compliance_issues, activeApl);
     const complianceBlock = issues.length
       ? `\n\nNAMING NOTES (${issues.length})
 These brands are on the menu but aren't written as the full product name:
 ${issues
   .map((i) => {
-    const where = cleanContext(i.cocktail);
+    const where = cleanIssueContext(i.cocktail);
     return `  ! "${i.found_text}"${
       where ? ` in ${where}` : ''
     } - should read "${i.correct_name}"`;
