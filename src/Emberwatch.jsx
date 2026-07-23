@@ -1012,6 +1012,36 @@ function UploadView({
 // ===========================================================================
 
 function ResultsView({ results, onNew, onExport, onOpenEmail }) {
+  const [newsStatus, setNewsStatus] = useState('idle'); // idle|loading|done|error
+  const [news, setNews] = useState(null);
+  const [newsError, setNewsError] = useState(null);
+
+  // Every APL brand that turned up in this batch. Checking only what's on
+  // these menus keeps the search count proportional to the run.
+  const brandsInBatch = [
+    ...new Set(results.aggregated.flatMap((s) => Object.keys(s.brands))),
+  ];
+
+  const checkBrandNews = async () => {
+    setNewsStatus('loading');
+    setNewsError(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/brand-news`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ brands: brandsInBatch }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `Server error: ${res.status}`);
+      setNews(data);
+      setNewsStatus('done');
+    } catch (err) {
+      console.error('Brand news failed:', err);
+      setNewsError(err.message);
+      setNewsStatus('error');
+    }
+  };
+
   return (
     <div style={{ width: '98%', margin: '0 auto', padding: '0 20px' }}>
       <div
@@ -1111,6 +1141,29 @@ function ResultsView({ results, onNew, onExport, onOpenEmail }) {
             Generate Reports
           </button>
           <button
+            onClick={checkBrandNews}
+            disabled={newsStatus === 'loading'}
+            title="Checks the APL brands on these menus for ownership or distribution changes"
+            style={{
+              background: 'rgba(255,255,255,0.2)',
+              color: 'white',
+              border: '2px solid white',
+              padding: '16px 32px',
+              borderRadius: '10px',
+              fontSize: '16px',
+              fontWeight: '800',
+              cursor: newsStatus === 'loading' ? 'wait' : 'pointer',
+              textTransform: 'uppercase',
+              letterSpacing: '1px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+            }}
+          >
+            <AlertTriangle size={18} />
+            {newsStatus === 'loading' ? 'Checking\u2026' : 'Brand Check'}
+          </button>
+          <button
             onClick={onExport}
             style={{
               background: 'white',
@@ -1188,6 +1241,223 @@ function ResultsView({ results, onNew, onExport, onOpenEmail }) {
               Tip: re-run just the failed file(s) on their own to see the raw
               response, or forward this list to check those menus by hand.
             </div>
+          </div>
+        )}
+
+        {newsStatus === 'loading' && (
+          <div
+            style={{
+              background: '#fafafa',
+              border: '2px solid #e8e8e8',
+              borderRadius: '12px',
+              padding: '20px 24px',
+              marginBottom: '32px',
+              color: '#666',
+              fontWeight: '700',
+              fontSize: '15px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '12px',
+            }}
+          >
+            <Flame
+              size={20}
+              color="#da291c"
+              style={{ animation: 'flicker 1s ease-in-out infinite' }}
+            />
+            Checking {brandsInBatch.length} brands for ownership and
+            distribution changes. This runs a web search per brand, so it takes
+            a minute.
+          </div>
+        )}
+
+        {newsStatus === 'error' && (
+          <div
+            style={{
+              background: '#fff5f5',
+              border: '2px solid #da291c',
+              borderRadius: '12px',
+              padding: '20px 24px',
+              marginBottom: '32px',
+              color: '#da291c',
+              fontWeight: '700',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '12px',
+            }}
+          >
+            <AlertTriangle size={20} />
+            Brand check failed: {newsError}
+          </div>
+        )}
+
+        {newsStatus === 'done' && news && (
+          <div style={{ marginBottom: '40px' }}>
+            <h2
+              style={{
+                fontSize: '32px',
+                fontWeight: '900',
+                marginBottom: '8px',
+                color: '#1a1a1a',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '12px',
+              }}
+            >
+              <AlertTriangle size={32} color="#b26a00" />
+              Brand Check ({news.events.length})
+            </h2>
+            <p
+              style={{
+                fontSize: '15px',
+                color: '#666',
+                margin: '0 0 24px 0',
+                lineHeight: '1.6',
+              }}
+            >
+              {news.checked} brands checked
+              {news.cached > 0 && ` (${news.cached} from cache)`}. Nothing here
+              changes the APL \u2014 verify each against its source, then update
+              the supplier mapping by hand if it holds up.
+            </p>
+
+            {news.events.length === 0 ? (
+              <div
+                style={{
+                  background: '#f0f9f4',
+                  border: '2px solid #28a745',
+                  borderRadius: '12px',
+                  padding: '20px 24px',
+                  color: '#28a745',
+                  fontWeight: '700',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '12px',
+                }}
+              >
+                <CheckCircle size={20} />
+                No ownership or distribution changes found for these brands.
+              </div>
+            ) : (
+              <div style={{ display: 'grid', gap: '16px' }}>
+                {news.events.map((e, i) => (
+                  <div
+                    key={i}
+                    style={{
+                      background: '#fffdf7',
+                      border: '2px solid #ffe1a6',
+                      borderRadius: '12px',
+                      padding: '20px 24px',
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '10px',
+                        flexWrap: 'wrap',
+                        marginBottom: '8px',
+                      }}
+                    >
+                      <strong style={{ fontSize: '18px', color: '#1a1a1a' }}>
+                        {e.brand}
+                      </strong>
+                      <span
+                        style={{
+                          fontSize: '11px',
+                          fontWeight: '800',
+                          textTransform: 'uppercase',
+                          letterSpacing: '1px',
+                          color: '#b26a00',
+                          background: '#fff3d6',
+                          borderRadius: '20px',
+                          padding: '4px 12px',
+                        }}
+                      >
+                        {e.type}
+                      </span>
+                      <span
+                        style={{
+                          fontSize: '11px',
+                          fontWeight: '800',
+                          textTransform: 'uppercase',
+                          letterSpacing: '1px',
+                          color:
+                            e.confidence === 'high'
+                              ? '#28a745'
+                              : e.confidence === 'medium'
+                              ? '#b26a00'
+                              : '#999',
+                          border: '1px solid currentColor',
+                          borderRadius: '20px',
+                          padding: '3px 10px',
+                        }}
+                      >
+                        {e.confidence} confidence
+                      </span>
+                      {e.date && (
+                        <span style={{ fontSize: '13px', color: '#999', fontWeight: '600' }}>
+                          {e.date}
+                        </span>
+                      )}
+                    </div>
+
+                    <div
+                      style={{
+                        fontSize: '15px',
+                        color: '#1a1a1a',
+                        lineHeight: '1.6',
+                        marginBottom: e.from || e.to ? '8px' : '10px',
+                      }}
+                    >
+                      {e.summary}
+                    </div>
+
+                    {(e.from || e.to) && (
+                      <div
+                        style={{
+                          fontSize: '14px',
+                          color: '#666',
+                          fontWeight: '700',
+                          marginBottom: '10px',
+                        }}
+                      >
+                        {e.from || 'Unknown'} \u2192 {e.to || 'Unknown'}
+                      </div>
+                    )}
+
+                    <a
+                      href={e.source_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{
+                        fontSize: '13px',
+                        color: '#da291c',
+                        fontWeight: '700',
+                        textDecoration: 'underline',
+                      }}
+                    >
+                      Verify at source
+                    </a>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {news.errors && news.errors.length > 0 && (
+              <div
+                style={{
+                  marginTop: '16px',
+                  fontSize: '13px',
+                  color: '#999',
+                  fontWeight: '600',
+                }}
+              >
+                {news.errors.length} brand
+                {news.errors.length > 1 ? 's' : ''} couldn't be checked:{' '}
+                {news.errors.map((x) => x.brand).join(', ')}
+              </div>
+            )}
           </div>
         )}
 
