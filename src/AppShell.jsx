@@ -4,6 +4,7 @@ import IntegrationTracker from './IntegrationTracker';
 import LeadershipDashboard from './LeadershipDashboard';
 import ReportTransformer from './ReportTransformer';
 import TheBeacon from './TheBeacon';
+import RfpPipeline from './RfpPipeline.jsx';
 
 // ---------------------------------------------------------------------------
 // Tool registry
