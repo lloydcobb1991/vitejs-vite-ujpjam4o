@@ -49,6 +49,13 @@ const TOOLS = [
     docsUrl: null,
     component: Emberwatch,
   },
+{
+  id: 'rfp',
+  name: 'RFP Pipeline',
+  description: 'Track RFP deadlines and vendor signups.',
+  docsUrl: null,
+  component: RfpPipeline,
+},
 ];
 
 const COLOR = {
