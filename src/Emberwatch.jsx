@@ -166,8 +166,10 @@ export default function Emberwatch() {
 
   // ----- Custom APL upload -----
 
-  const handleAplUpload = async (e) => {
-    const file = e.target.files[0];
+  // Shared file-processing logic used by both the file-input change handler
+  // and the drag-and-drop handler. Both paths converge here so parsing and
+  // error handling stay consistent.
+  const processAplFile = async (file) => {
     if (!file) return;
 
     setAplError(null);
@@ -193,10 +195,14 @@ export default function Emberwatch() {
           // Flat parse couldn't find headers — try structured parsing
           brands = parseStructuredXlsxApl(workbook);
         }
-      } else {
+      } else if (ext === 'csv') {
         // CSV path
         const text = await file.text();
         brands = parseAplCsv(text);
+      } else {
+        throw new Error(
+          `Unsupported file type: .${ext}. Please upload a CSV or Excel file.`
+        );
       }
 
       if (brands.length === 0) {
@@ -211,9 +217,18 @@ export default function Emberwatch() {
       setAplError(err.message || 'Could not read this APL file.');
       setCustomApl(null);
     }
+  };
 
+  const handleAplUpload = async (e) => {
+    const file = e.target.files[0];
+    await processAplFile(file);
     // Reset the input so re-selecting the same file re-fires onChange
     if (aplInputRef.current) aplInputRef.current.value = '';
+  };
+
+  // Called by the drag-and-drop handler in UploadView with a File object
+  const handleAplDrop = async (file) => {
+    await processAplFile(file);
   };
 
   const clearCustomApl = () => {
@@ -724,6 +739,7 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
           aplInputRef={aplInputRef}
           onPickApl={() => aplInputRef.current?.click()}
           onAplUpload={handleAplUpload}
+          onAplDrop={handleAplDrop}
           onClearApl={clearCustomApl}
           onFilesChange={handleFilesChange}
           onAnalyze={analyzeMenus}
@@ -770,21 +786,62 @@ function UploadView({
   aplInputRef,
   onPickApl,
   onAplUpload,
+  onAplDrop,
   onClearApl,
   onFilesChange,
   onAnalyze,
 }) {
+  // Local drag state so the APL card can highlight while a file is being
+  // dragged over it. We use a counter (not a boolean) because
+  // dragEnter/dragLeave fires on children too — otherwise the highlight
+  // would flicker when the user drags across nested elements.
+  const [aplDragDepth, setAplDragDepth] = useState(0);
+  const isAplDragActive = aplDragDepth > 0;
+
+  const handleAplDragEnter = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setAplDragDepth((d) => d + 1);
+  };
+  const handleAplDragLeave = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setAplDragDepth((d) => Math.max(0, d - 1));
+  };
+  const handleAplDragOver = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+  const handleAplFileDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setAplDragDepth(0);
+    const file = e.dataTransfer?.files?.[0];
+    if (file && onAplDrop) {
+      onAplDrop(file);
+    }
+  };
+
   return (
     <div style={{ width: '98%', margin: '0 auto', padding: '0 20px' }}>
-      {/* APL selection panel */}
+      {/* APL selection panel — supports both click-to-upload and drag-and-drop */}
       <div
+        onDragEnter={handleAplDragEnter}
+        onDragLeave={handleAplDragLeave}
+        onDragOver={handleAplDragOver}
+        onDrop={handleAplFileDrop}
         style={{
-          background: 'white',
+          background: isAplDragActive ? '#fff5f5' : 'white',
           borderRadius: '16px',
           padding: '24px 32px',
           marginBottom: '24px',
           boxShadow: '0 2px 8px rgba(0,0,0,0.06)',
-          border: customApl ? '2px solid #da291c' : '2px solid #ececec',
+          border: isAplDragActive
+            ? '2px dashed #da291c'
+            : customApl
+              ? '2px solid #da291c'
+              : '2px solid #ececec',
+          transition: 'background 0.15s ease, border-color 0.15s ease',
         }}
       >
         <div
@@ -924,7 +981,8 @@ function UploadView({
           Upload a CSV or Excel file with{' '}
           <strong style={{ color: '#666' }}>Brand Name</strong> and{' '}
           <strong style={{ color: '#666' }}>Supplier</strong> columns to use a
-          client-specific list instead of the built-in.
+          client-specific list instead of the built-in.{' '}
+          <span style={{ color: '#bbb' }}>· Or drag your APL file here.</span>
         </div>
       </div>
 
@@ -3158,6 +3216,37 @@ function parseStructuredXlsxApl(workbook) {
     return false;
   };
 
+  // Layout markers used in location-approval columns and legend keys.
+  // These get mis-picked as brand names when the parser's brand-column
+  // vote drifts to a column full of X-markers instead of the real brand
+  // column. Reject any single/short-token marker up front.
+  const MARKER_TOKENS = new Set([
+    'X', 'BS', 'AB', 'N/A', 'NA', '-', '--', '—', '•', '✓', '✔', 'YES', 'NO',
+    'LEGEND', 'KEY',
+  ]);
+  const looksLikeMarker = (s) => {
+    const trimmed = s.trim();
+    if (!trimmed) return true;
+    if (MARKER_TOKENS.has(trimmed.toUpperCase())) return true;
+    // Any single letter or single symbol is a marker, not a brand name
+    if (trimmed.length === 1) return true;
+    // 2-3 char all-caps with no vowels is almost certainly a marker code (BS, XX, AB)
+    if (trimmed.length <= 3 && /^[A-Z]+$/.test(trimmed) && !/[AEIOU]/.test(trimmed)) return true;
+    return false;
+  };
+
+  // Color / icon names used in legend sections. If a "supplier" cell contains
+  // one of these, it's a legend row, not a real brand row.
+  const LEGEND_COLOR_WORDS = new Set([
+    'TAUPE', 'CORNFLOWER', 'ORANGE', 'TURQUOISE', 'SALMON', 'GREY', 'GRAY',
+    'WHITE', 'GREEN', 'RED', 'BLUE', 'YELLOW', 'PINK', 'PURPLE', 'BLACK',
+    'BROWN', 'BEIGE', 'TEAL', 'MAGENTA', 'CYAN', 'GOLD', 'SILVER',
+    'COLOR / ICON', 'COLOR/ICON', 'COLOR', 'ICON',
+  ]);
+  const looksLikeLegendSupplier = (s) => {
+    return LEGEND_COLOR_WORDS.has(s.trim().toUpperCase());
+  };
+
   for (const sheetName of workbook.SheetNames) {
     const sheet = workbook.Sheets[sheetName];
     if (!sheet || !sheet['!ref']) continue;
@@ -3233,8 +3322,15 @@ function parseStructuredXlsxApl(workbook) {
         if (brandRaw.startsWith('*')) continue;
         if (looksLikeCategoryHeader(brandRaw)) continue;
 
+        // Reject brand cells that are actually location-approval markers
+        // ("X", "BS", checkmarks, etc.) rather than real brand names
+        if (looksLikeMarker(brandRaw)) continue;
+
         // Skip suppliers that are clearly punctuation/junk
         if (supplierRaw.length < 2) continue;
+
+        // Reject rows from the legend/color-key section (supplier is a color word)
+        if (looksLikeLegendSupplier(supplierRaw)) continue;
 
         const key = `${brandRaw.toLowerCase()}|${supplierRaw.toLowerCase()}`;
         if (seen.has(key)) continue;
