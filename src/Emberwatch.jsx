@@ -242,6 +242,17 @@ export default function Emberwatch() {
       return;
     }
 
+    // A failed APL upload leaves customApl null, which silently reverts
+    // activeApl to the built-in list. Running 39 client menus against the
+    // wrong brand list produces a clean-looking, completely wrong report —
+    // far more dangerous than a crash. Refuse to run until it's resolved.
+    if (aplError) {
+      setError(
+        `The uploaded APL didn't parse, so Fire Watch would fall back to the ${APL_DATA.brands.length}-brand built-in list. Re-upload a valid APL, or click "Use Built-in" to run against the built-in list deliberately.`
+      );
+      return;
+    }
+
     setAnalyzing(true);
     setError(null);
     setProgress('Converting PDFs...');
@@ -1002,10 +1013,15 @@ function UploadView({
 
         <button
           onClick={onAnalyze}
-          disabled={analyzing || uploadedFiles.length === 0}
+          disabled={analyzing || uploadedFiles.length === 0 || !!aplError}
+          title={
+            aplError
+              ? 'Resolve the APL error above before analyzing'
+              : ''
+          }
           style={{
             width: '100%',
-            background: analyzing ? '#999' : '#da291c',
+            background: analyzing || aplError ? '#999' : '#da291c',
             color: 'white',
             border: 'none',
             padding: '28px',
@@ -1013,7 +1029,7 @@ function UploadView({
             fontSize: '24px',
             fontWeight: '900',
             cursor:
-              analyzing || uploadedFiles.length === 0
+              analyzing || uploadedFiles.length === 0 || aplError
                 ? 'not-allowed'
                 : 'pointer',
             textTransform: 'uppercase',
@@ -3208,44 +3224,46 @@ function parseStructuredXlsxApl(workbook) {
   const brands = [];
   const seen = new Set();
 
-  // Heuristic: a brand string that looks like a category header
-  // (e.g., "RUM - 10", "TEQUILA - 17 (order silver - extra anejo)")
+  // Category headers: "RUM - 7", "WHITE WINE (750 mL) - 6",
+  // "TEQUILA - 17 (order silver - extra anejo)".
   const looksLikeCategoryHeader = (s) => {
-    if (/^[A-Z/\s\-]+ - \d+/.test(s)) return true;
-    if (/.+- \d+\s*\(.+\)?\s*$/.test(s)) return true;
+    const t = s.trim();
+    if (/ - \d+\s*$/.test(t)) return true;
+    if (/ - \d+\s*\(.*\)\s*$/.test(t)) return true;
+    if (/^[A-Z/\s\-]+ - \d+/.test(t)) return true;
+    if (t.toUpperCase() === 'APL BAR MANDATE') return true;
     return false;
   };
 
-  // Layout markers used in location-approval columns and legend keys.
-  // These get mis-picked as brand names when the parser's brand-column
-  // vote drifts to a column full of X-markers instead of the real brand
-  // column. Reject any single/short-token marker up front.
+  // Sub-headers that sit BETWEEN the brand column and the SUPPLIER column.
+  // BEER uses STYLE, WINE uses VARIETAL. LIQUOR and NON ALC have neither.
+  // This is why brandCol is not always supplierCol - 1.
+  const SUB_HEADERS = new Set(['STYLE', 'VARIETAL', 'TYPE', 'CATEGORY']);
+
+  // Venue-approval markers and short venue codes that appear in the columns
+  // to the RIGHT of SUPPLIER and in repeated header rows.
   const MARKER_TOKENS = new Set([
-    'X', 'BS', 'AB', 'N/A', 'NA', '-', '--', '—', '•', '✓', '✔', 'YES', 'NO',
-    'LEGEND', 'KEY',
+    'X', 'BS', 'BSH', 'AB', 'LB', 'EL', 'EL2', 'FD', 'CS', 'B1', 'B2', 'B3',
+    'WB', 'RE', 'C', 'N/A', 'NA', '-', '--', '—', '•', '✓', '✔', 'YES', 'NO',
+    'LEGEND', 'KEY', 'LOCATIONS',
   ]);
   const looksLikeMarker = (s) => {
-    const trimmed = s.trim();
-    if (!trimmed) return true;
-    if (MARKER_TOKENS.has(trimmed.toUpperCase())) return true;
-    // Any single letter or single symbol is a marker, not a brand name
-    if (trimmed.length === 1) return true;
-    // 2-3 char all-caps with no vowels is almost certainly a marker code (BS, XX, AB)
-    if (trimmed.length <= 3 && /^[A-Z]+$/.test(trimmed) && !/[AEIOU]/.test(trimmed)) return true;
+    const t = s.trim();
+    if (!t) return true;
+    if (MARKER_TOKENS.has(t.toUpperCase())) return true;
+    if (t.length === 1) return true;
+    if (t.length <= 3 && /^[A-Z0-9]+$/.test(t) && !/[AEIOU]/.test(t)) return true;
     return false;
   };
 
-  // Color / icon names used in legend sections. If a "supplier" cell contains
-  // one of these, it's a legend row, not a real brand row.
   const LEGEND_COLOR_WORDS = new Set([
     'TAUPE', 'CORNFLOWER', 'ORANGE', 'TURQUOISE', 'SALMON', 'GREY', 'GRAY',
     'WHITE', 'GREEN', 'RED', 'BLUE', 'YELLOW', 'PINK', 'PURPLE', 'BLACK',
-    'BROWN', 'BEIGE', 'TEAL', 'MAGENTA', 'CYAN', 'GOLD', 'SILVER',
+    'BROWN', 'BEIGE', 'TEAL', 'MAGENTA', 'CYAN', 'GOLD', 'SILVER', 'LAVENDER',
     'COLOR / ICON', 'COLOR/ICON', 'COLOR', 'ICON',
   ]);
-  const looksLikeLegendSupplier = (s) => {
-    return LEGEND_COLOR_WORDS.has(s.trim().toUpperCase());
-  };
+  const looksLikeLegendSupplier = (s) =>
+    LEGEND_COLOR_WORDS.has(s.trim().toUpperCase());
 
   for (const sheetName of workbook.SheetNames) {
     const sheet = workbook.Sheets[sheetName];
@@ -3255,88 +3273,71 @@ function parseStructuredXlsxApl(workbook) {
     const maxRow = range.e.r;
     const maxCol = range.e.c;
 
-    // Helper: read a cell's string value (0-indexed row + col)
     const cellAt = (r, c) => {
-      const addr = XLSX.utils.encode_cell({ r, c });
-      const cell = sheet[addr];
+      if (c < 0 || c > maxCol || r < 0 || r > maxRow) return '';
+      const cell = sheet[XLSX.utils.encode_cell({ r, c })];
       if (!cell || cell.v === undefined || cell.v === null) return '';
-      return String(cell.v).trim();
+      return String(cell.v).replace(/\s+/g, ' ').trim();
     };
 
-    // Step 1: find all unique SUPPLIER columns
-    const supplierCols = new Set();
+    // ---- Resolve each zone by walking LEFT from its SUPPLIER anchor. ----
+    //
+    // The old code voted for "leftmost non-empty cell in the zone", where the
+    // zone started just after the PREVIOUS supplier column. For a sheet with
+    // venue-approval columns, that start lands inside the previous zone's
+    // block of X-markers, so the vote elected a marker column as the brand
+    // column. Walking left from SUPPLIER is deterministic and can't drift.
+    const zones = new Map(); // supplierCol -> { brandCol, headerRows:Set }
+
     for (let r = 0; r <= maxRow; r++) {
       for (let c = 0; c <= maxCol; c++) {
-        if (cellAt(r, c).toUpperCase() === 'SUPPLIER') {
-          supplierCols.add(c);
+        if (cellAt(r, c).toUpperCase() !== 'SUPPLIER') continue;
+
+        let brandCol = c - 1;
+        while (brandCol >= 0 && SUB_HEADERS.has(cellAt(r, brandCol).toUpperCase())) {
+          brandCol -= 1;
         }
+        if (brandCol < 0) continue;
+
+        if (!zones.has(c)) zones.set(c, { brandCol, headerRows: new Set() });
+        const zone = zones.get(c);
+        // A repeated header row that omits STYLE must not pull the zone
+        // rightwards onto the sub-header column.
+        zone.brandCol = Math.min(zone.brandCol, brandCol);
+        zone.headerRows.add(r);
       }
     }
-    if (supplierCols.size === 0) continue;
-    const sortedSupCols = Array.from(supplierCols).sort((a, b) => a - b);
 
-    // Step 2: build column zones
-    const zones = [];
-    let prev = -1;
-    for (const sc of sortedSupCols) {
-      zones.push({ start: prev + 1, end: sc, supplierCol: sc });
-      prev = sc;
-    }
-
-    // Step 3: for each zone, vote on the brand column
-    for (const zone of zones) {
-      const votes = {};
-      const headerRows = [];
-      for (let r = 0; r <= maxRow; r++) {
-        if (cellAt(r, zone.supplierCol).toUpperCase() === 'SUPPLIER') {
-          headerRows.push(r);
-          for (let c = zone.start; c < zone.end; c++) {
-            if (cellAt(r, c)) {
-              votes[c] = (votes[c] || 0) + 1;
-              break;
-            }
-          }
-        }
-      }
-      if (Object.keys(votes).length === 0) continue;
-      // Most votes wins; ties broken leftmost
-      const brandCol = Object.entries(votes)
-        .map(([k, v]) => [Number(k), v])
-        .sort((a, b) => b[1] - a[1] || a[0] - b[0])[0][0];
-      zone.brandCol = brandCol;
-      zone.headerRows = new Set(headerRows);
-    }
-
-    // Step 4: walk data rows for each zone
-    for (const zone of zones) {
-      if (zone.brandCol === undefined) continue;
+    // ---- Read each zone top to bottom. ----
+    // Categories stack vertically inside one zone (VODKA, then RUM, then
+    // WHISKEY), each re-printing its own header row, so we scan every row and
+    // skip the header rows rather than stopping at the first one.
+    for (const [supplierCol, zone] of zones) {
       for (let r = 0; r <= maxRow; r++) {
         if (zone.headerRows.has(r)) continue;
+
         const brandRaw = cellAt(r, zone.brandCol);
-        const supplierRaw = cellAt(r, zone.supplierCol);
+        const supplierRaw = cellAt(r, supplierCol);
         if (!brandRaw || !supplierRaw) continue;
         if (supplierRaw.toUpperCase() === 'SUPPLIER') continue;
 
-        // Skip junk
         if (brandRaw.toUpperCase().startsWith('LOCATIONS')) continue;
         if (brandRaw.startsWith('*')) continue;
         if (looksLikeCategoryHeader(brandRaw)) continue;
-
-        // Reject brand cells that are actually location-approval markers
-        // ("X", "BS", checkmarks, etc.) rather than real brand names
         if (looksLikeMarker(brandRaw)) continue;
-
-        // Skip suppliers that are clearly punctuation/junk
         if (supplierRaw.length < 2) continue;
-
-        // Reject rows from the legend/color-key section (supplier is a color word)
         if (looksLikeLegendSupplier(supplierRaw)) continue;
 
-        const key = `${brandRaw.toLowerCase()}|${supplierRaw.toLowerCase()}`;
+        // Strip the house-brand dagger so the same brand from two sheets
+        // aggregates into one row.
+        const name = brandRaw.replace(/\s*†\s*/g, ' ').replace(/\s+/g, ' ').trim();
+        if (!name || looksLikeMarker(name)) continue;
+
+        const key = `${name.toLowerCase()}|${supplierRaw.toLowerCase()}`;
         if (seen.has(key)) continue;
         seen.add(key);
 
-        brands.push({ name: brandRaw, supplier: supplierRaw });
+        brands.push({ name, supplier: supplierRaw });
       }
     }
   }
