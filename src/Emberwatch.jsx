@@ -152,6 +152,7 @@ export default function Emberwatch() {
   const [progress, setProgress] = useState('');
   const [view, setView] = useState('upload'); // 'upload' | 'results' | 'email'
   const [customApl, setCustomApl] = useState(null); // { name, brands } or null
+  const [fileLabels, setFileLabels] = useState({}); // filename -> group label
   const [aplError, setAplError] = useState(null);
   const aplInputRef = useRef(null);
 
@@ -162,6 +163,29 @@ export default function Emberwatch() {
     setUploadedFiles(files);
     setResults(null);
     setError(null);
+    // Seed a default label for anything new, without clobbering labels the
+    // user has already edited for files that are still in the list.
+    setFileLabels((prev) => {
+      const next = {};
+      for (const f of files) {
+        next[f.name] = prev[f.name] ?? defaultLabelFromFilename(f.name);
+      }
+      return next;
+    });
+  };
+
+  const setFileLabel = (filename, value) => {
+    setFileLabels((prev) => ({ ...prev, [filename]: value }));
+  };
+
+  // Apply one label to every uploaded file — the common case when a whole
+  // batch belongs to a single property.
+  const setAllFileLabels = (value) => {
+    setFileLabels(() => {
+      const next = {};
+      for (const f of uploadedFiles) next[f.name] = value;
+      return next;
+    });
   };
 
   // ----- Custom APL upload -----
@@ -287,7 +311,7 @@ export default function Emberwatch() {
         try {
           const analysis = await analyzeMenuWithClaude(fileData);
           menuAnalyses.push({
-            location: extractLocation(fileData.name),
+            location: resolveLocation(fileData.name),
             filename: fileData.name,
             ...analysis,
           });
@@ -296,7 +320,7 @@ export default function Emberwatch() {
           const msg = menuErr.message || String(menuErr);
           failedMenus.push({
             filename: fileData.name,
-            location: extractLocation(fileData.name),
+            location: resolveLocation(fileData.name),
             error: msg,
           });
           if (msg.startsWith('ACCOUNT:')) {
@@ -645,11 +669,15 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
     return parseClaudeJson(text);
   };
 
-  const extractLocation = (filename) => {
-    if (filename.includes('NYC')) return 'New York City';
-    if (filename.includes('LV')) return 'Las Vegas';
-    if (filename.includes('DC')) return 'Washington DC';
-    return filename.replace(/[^a-zA-Z0-9]/g, ' ');
+  // Which group a menu belongs to. Defaults to a tidied filename, but the
+  // label the user typed on the upload screen always wins. Grouping is
+  // deliberately free text: reports go out per property most of the time, but
+  // sometimes per region, so hard-coding a hierarchy would be wrong by
+  // next quarter.
+  const resolveLocation = (filename) => {
+    const typed = fileLabels[filename];
+    if (typed && typed.trim()) return typed.trim();
+    return defaultLabelFromFilename(filename);
   };
 
   const aggregateBySupplier = (menuAnalyses) => {
@@ -661,7 +689,7 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
     menuAnalyses.forEach((menu) => {
       Object.entries(menu.brand_impressions || {}).forEach(([brand, data]) => {
         const supplier = data.supplier || 'UNKNOWN';
-        const brandKey = brand.trim().toLowerCase();
+        const brandKey = normalizeBrandKey(brand);
 
         if (!supplierTotals[supplier]) {
           supplierTotals[supplier] = { total: 0, brands: {}, locations: {} };
@@ -670,7 +698,7 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
 
         // Pick display name: first one we see for this normalized key
         if (!canonicalDisplayName[supplier][brandKey]) {
-          canonicalDisplayName[supplier][brandKey] = brand.trim();
+          canonicalDisplayName[supplier][brandKey] = normalizeBrandDisplay(brand);
         }
         const displayName = canonicalDisplayName[supplier][brandKey];
 
@@ -691,43 +719,52 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
   // brand_impressions map, matching case-insensitively.
   const findMenuBrandCount = (menu, brandName) => {
     if (!menu || !menu.brand_impressions) return 0;
-    const target = brandName.trim().toLowerCase();
+    // Sum rather than return-first: one menu can carry both "Brand (Gin)" and
+    // "Brand [Gin]" if the model wavered mid-response, and both belong here.
+    const target = normalizeBrandKey(brandName);
+    let total = 0;
     for (const [name, data] of Object.entries(menu.brand_impressions)) {
-      if (name.trim().toLowerCase() === target) {
-        return data.count || 0;
+      if (normalizeBrandKey(name) === target) {
+        total += data.count || 0;
       }
     }
-    return 0;
+    return total;
   };
 
   const exportToCSV = () => {
     if (!results) return;
 
-    const rows = [
-      ['Supplier', 'Brand', 'NYC', 'Las Vegas', 'Washington DC', 'Total'],
-    ];
+    const rows = [];
+
+    // Columns come from the groups actually present in this batch, not from a
+    // fixed list of cities. The old header was hard-coded to NYC / Las Vegas /
+    // Washington DC, so every other client exported a wall of zeros next to a
+    // correct total.
+    const groups = [...new Set(results.menuAnalyses.map((m) => m.location))]
+      .filter(Boolean)
+      .sort((a, b) => a.localeCompare(b));
+
+    // Several menus can share one group — a property with a lunch menu, a
+    // drinks menu and a banquet playbook is still one property — so sum across
+    // every menu in the group rather than taking the first match.
+    const countForGroup = (group, brand) =>
+      results.menuAnalyses
+        .filter((m) => m.location === group)
+        .reduce((n, m) => n + findMenuBrandCount(m, brand), 0);
+
+    const csvCell = (v) => {
+      const t = String(v ?? '');
+      return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t;
+    };
+
+    rows.push(['Supplier', 'Brand', ...groups, 'Total']);
 
     results.aggregated.forEach((supplier) => {
       Object.entries(supplier.brands).forEach(([brand, totalCount]) => {
-        const nycCount = findMenuBrandCount(
-          results.menuAnalyses.find((m) => m.location === 'New York City'),
-          brand
-        );
-        const lvCount = findMenuBrandCount(
-          results.menuAnalyses.find((m) => m.location === 'Las Vegas'),
-          brand
-        );
-        const dcCount = findMenuBrandCount(
-          results.menuAnalyses.find((m) => m.location === 'Washington DC'),
-          brand
-        );
-
         rows.push([
           supplier.supplier,
           brand,
-          nycCount,
-          lvCount,
-          dcCount,
+          ...groups.map((g) => countForGroup(g, brand)),
           totalCount,
         ]);
       });
@@ -744,11 +781,13 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
           .map(([loc, c]) => `${loc} (${c})`)
           .join('; ');
         // Quote the free-text fields so any stray commas don't break columns.
-        rows.push([`"${b.name}"`, b.category || '', `"${locs}"`, b.total]);
+        rows.push([csvCell(b.name), csvCell(b.category || ''), csvCell(locs), b.total]);
       });
     }
 
-    const csv = rows.map((row) => row.join(',')).join('\n');
+    const csv = rows
+      .map((row) => row.map((cell) => csvCell(cell)).join(','))
+      .join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -796,6 +835,10 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
           onAplDrop={handleAplDrop}
           onClearApl={clearCustomApl}
           onFilesChange={handleFilesChange}
+          fileLabels={fileLabels}
+          onFileLabelChange={setFileLabel}
+          onApplyLabelToAll={setAllFileLabels}
+          defaultLabelFor={defaultLabelFromFilename}
           onAnalyze={analyzeMenus}
         />
       )}
@@ -843,6 +886,10 @@ function UploadView({
   onAplDrop,
   onClearApl,
   onFilesChange,
+  fileLabels,
+  onFileLabelChange,
+  onApplyLabelToAll,
+  defaultLabelFor,
   onAnalyze,
 }) {
   // Local drag state so the APL card can highlight while a file is being
@@ -1054,6 +1101,170 @@ function UploadView({
           disabled={analyzing}
         />
 
+        {uploadedFiles.length > 0 && (
+          <div
+            style={{
+              margin: '28px 0 8px',
+              padding: '24px 28px',
+              background: '#fafafa',
+              border: '2px solid #ececec',
+              borderRadius: '12px',
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'flex-end',
+                flexWrap: 'wrap',
+                gap: '12px',
+                marginBottom: '6px',
+              }}
+            >
+              <div>
+                <div
+                  style={{
+                    fontSize: '11px',
+                    fontWeight: '800',
+                    color: '#999',
+                    letterSpacing: '2px',
+                    textTransform: 'uppercase',
+                  }}
+                >
+                  Report Grouping
+                </div>
+                <div
+                  style={{
+                    fontSize: '13px',
+                    color: '#666',
+                    marginTop: '4px',
+                    fontWeight: '500',
+                    lineHeight: '1.6',
+                    maxWidth: '640px',
+                  }}
+                >
+                  These become the columns in the export and one email per
+                  group. Give several menus the same label to roll them up —
+                  a property with a lunch menu, a drinks menu and a banquet
+                  playbook is still one property.
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  const first = uploadedFiles[0];
+                  const seed =
+                    (first && fileLabels[first.name]) ||
+                    (first && defaultLabelFor(first.name)) ||
+                    '';
+                  const value = window.prompt(
+                    'Label every uploaded menu as:',
+                    seed
+                  );
+                  if (value !== null && value.trim()) {
+                    onApplyLabelToAll(value.trim());
+                  }
+                }}
+                disabled={analyzing}
+                style={{
+                  background: 'white',
+                  color: '#da291c',
+                  border: '2px solid #da291c',
+                  padding: '10px 18px',
+                  borderRadius: '8px',
+                  fontSize: '12px',
+                  fontWeight: '800',
+                  cursor: analyzing ? 'not-allowed' : 'pointer',
+                  textTransform: 'uppercase',
+                  letterSpacing: '1px',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                Same label for all
+              </button>
+            </div>
+
+            <div
+              style={{
+                display: 'grid',
+                gap: '8px',
+                marginTop: '18px',
+                maxHeight: '340px',
+                overflowY: 'auto',
+              }}
+            >
+              {uploadedFiles.map((f) => (
+                <div
+                  key={f.name}
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)',
+                    gap: '12px',
+                    alignItems: 'center',
+                  }}
+                >
+                  <div
+                    title={f.name}
+                    style={{
+                      fontSize: '13px',
+                      color: '#888',
+                      fontWeight: '600',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {f.name}
+                  </div>
+                  <input
+                    type="text"
+                    value={fileLabels[f.name] ?? ''}
+                    disabled={analyzing}
+                    placeholder={defaultLabelFor(f.name)}
+                    onChange={(e) => onFileLabelChange(f.name, e.target.value)}
+                    style={{
+                      width: '100%',
+                      padding: '9px 12px',
+                      fontSize: '14px',
+                      border: '2px solid #ddd',
+                      borderRadius: '8px',
+                      fontWeight: '700',
+                      color: '#1a1a1a',
+                      background: 'white',
+                    }}
+                  />
+                </div>
+              ))}
+            </div>
+
+            <div
+              style={{
+                marginTop: '14px',
+                fontSize: '12px',
+                color: '#999',
+                fontWeight: '600',
+              }}
+            >
+              {new Set(
+                uploadedFiles.map(
+                  (f) =>
+                    (fileLabels[f.name] || '').trim() || defaultLabelFor(f.name)
+                )
+              ).size}{' '}
+              group
+              {new Set(
+                uploadedFiles.map(
+                  (f) =>
+                    (fileLabels[f.name] || '').trim() || defaultLabelFor(f.name)
+                )
+              ).size === 1
+                ? ''
+                : 's'}{' '}
+              across {uploadedFiles.length} menu
+              {uploadedFiles.length === 1 ? '' : 's'}
+            </div>
+          </div>
+        )}
+
         <button
           onClick={onAnalyze}
           disabled={analyzing || uploadedFiles.length === 0 || !!aplError}
@@ -1135,6 +1346,54 @@ function UploadView({
 // found_text is a paragraph of reasoning instead of the string on the menu.
 // None of them survive here.
 // ---------------------------------------------------------------------------
+
+// The model is asked to key category variants as "Brand (Category)", but it
+// sometimes echoes the APL's own "Brand [Category]" bracket form instead.
+// On one menu that's cosmetic; across a 39-menu batch the two forms land in
+// separate rows and the brand fragments. Normalising here is deterministic —
+// it doesn't depend on the model following formatting instructions.
+const normalizeBrandKey = (raw) =>
+  String(raw || '')
+    .replace(/\[([^\]]*)\]/g, '($1)')
+    .replace(/\s*\(\s*/g, ' (')
+    .replace(/\s*\)\s*/g, ') ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+
+// Same normalisation, but preserving case for what's shown on screen and in
+// the CSV. Bracket form becomes paren form so one brand reads one way.
+const normalizeBrandDisplay = (raw) =>
+  String(raw || '')
+    .replace(/\[([^\]]*)\]/g, '($1)')
+    .replace(/\s*\(\s*/g, ' (')
+    .replace(/\s*\)\s*/g, ') ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+// Turn a menu filename into a readable default group label.
+//   "w25_JAH_v3b.pdf"                -> "W25 JAH"
+//   "EmbassyDenton-EDITS (1).pdf"    -> "Embassy Denton"
+//   "Snow Summit F B Playbook.pdf"   -> "Snow Summit F B Playbook"
+// Deliberately conservative: it tidies obvious noise and stops. The user can
+// always overwrite it, and a wrong guess that looks plausible is worse than an
+// ugly one that prompts an edit.
+function defaultLabelFromFilename(filename) {
+  let t = String(filename || '').trim();
+  t = t.replace(/\.[A-Za-z0-9]{1,5}$/, '');          // extension
+  t = t.replace(/[\s_-]*\(\s*\d+\s*\)\s*$/, '');    // trailing "(1)"
+  t = t.replace(/[\s_-]*__\d+_$/, '');                // trailing "__1_"
+  t = t.replace(/[_]+/g, ' ');
+  t = t.replace(/-{2,}/g, ' ');
+  t = t.replace(/\bv\d+[a-z]?\b/gi, '');             // version tokens: v2, v3b
+  t = t.replace(/\b(final|edits?|draft|copy|rev\d*)\b/gi, '');
+  t = t.replace(/\bpdf\b/gi, '');
+  t = t.replace(/\s+/g, ' ').replace(/[\s-]+$/, '').trim();
+  // Split camelCase runs so "EmbassyDenton" reads as two words.
+  t = t.replace(/([a-z])([A-Z])/g, '$1 $2');
+  t = t.replace(/\s+/g, ' ').trim();
+  return t || String(filename || '').trim();
+}
 
 function filterIssues(issues, activeApl) {
   const aplNames = new Set(
@@ -1317,6 +1576,42 @@ function ResultsView({ results, activeApl, onNew, onExport, onOpenEmail }) {
             {results.aggregated.reduce((sum, s) => sum + s.total, 0)} total
             impressions
           </p>
+          {/* Which APL produced these numbers. Two separate batches have now
+              been run against the wrong brand list and looked entirely
+              plausible; the only tell was buried on the upload screen. */}
+          <div
+            style={{
+              marginTop: '12px',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '8px',
+              background: 'rgba(0,0,0,0.22)',
+              border: '1px solid rgba(255,255,255,0.35)',
+              borderRadius: '30px',
+              padding: '8px 18px',
+            }}
+          >
+            <FileText size={16} color="white" />
+            <span
+              style={{
+                color: 'white',
+                fontSize: '14px',
+                fontWeight: '800',
+                letterSpacing: '0.2px',
+              }}
+            >
+              {activeApl.name}
+            </span>
+            <span
+              style={{
+                color: 'rgba(255,255,255,0.85)',
+                fontSize: '13px',
+                fontWeight: '600',
+              }}
+            >
+              · {activeApl.brands.length} brands
+            </span>
+          </div>
         </div>
         <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
           <button
@@ -3502,7 +3797,7 @@ function buildVenueEmails(results, activeApl) {
       const count = data.count || 0;
       if (!bySupplier[sup]) bySupplier[sup] = [];
       bySupplier[sup].push({
-        brand: brand.trim(),
+        brand: normalizeBrandDisplay(brand),
         count,
         cocktails: data.cocktails || [],
       });
