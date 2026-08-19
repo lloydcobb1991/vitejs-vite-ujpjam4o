@@ -352,7 +352,7 @@ export default function Emberwatch() {
 
       setProgress('Aggregating results...');
       const aggregated = aggregateBySupplier(menuAnalyses);
-      const offApl = aggregateOffApl(menuAnalyses);
+      const offApl = aggregateOffApl(menuAnalyses, activeApl);
 
       setResults({ menuAnalyses, aggregated, offApl, failedMenus });
       setView('results');
@@ -1190,6 +1190,7 @@ function UploadView({
                 marginTop: '18px',
                 maxHeight: '340px',
                 overflowY: 'auto',
+                overflowX: 'hidden',
               }}
             >
               {uploadedFiles.map((f) => (
@@ -1381,17 +1382,26 @@ const normalizeBrandDisplay = (raw) =>
 function defaultLabelFromFilename(filename) {
   let t = String(filename || '').trim();
   t = t.replace(/\.[A-Za-z0-9]{1,5}$/, '');          // extension
-  t = t.replace(/[\s_-]*\(\s*\d+\s*\)\s*$/, '');    // trailing "(1)"
-  t = t.replace(/[\s_-]*__\d+_$/, '');                // trailing "__1_"
+  // Repeat: browsers hand back "file (1) (1).pdf" after two downloads, and a
+  // single pass leaves one behind.
+  for (let i = 0; i < 4; i++) {
+    const before = t;
+    t = t.replace(/[\s_-]*\(\s*\d+\s*\)\s*$/, '');
+    t = t.replace(/[\s_-]*__\d+_\s*$/, '');
+    if (t === before) break;
+  }
   t = t.replace(/[_]+/g, ' ');
   t = t.replace(/-{2,}/g, ' ');
   t = t.replace(/\bv\d+[a-z]?\b/gi, '');             // version tokens: v2, v3b
   t = t.replace(/\b(final|edits?|draft|copy|rev\d*)\b/gi, '');
   t = t.replace(/\bpdf\b/gi, '');
-  t = t.replace(/\s+/g, ' ').replace(/[\s-]+$/, '').trim();
+  t = t.replace(/\s+/g, ' ').trim();
+  // Words removed above can strand punctuation: "EmbassyDenton-EDITS" -> "EmbassyDenton-".
+  t = t.replace(/^[\s\-–—_.,;:]+|[\s\-–—_.,;:]+$/g, '').trim();
   // Split camelCase runs so "EmbassyDenton" reads as two words.
   t = t.replace(/([a-z])([A-Z])/g, '$1 $2');
   t = t.replace(/\s+/g, ' ').trim();
+  t = t.replace(/^[\s\-–—_.,;:]+|[\s\-–—_.,;:]+$/g, '').trim();
   return t || String(filename || '').trim();
 }
 
@@ -3410,7 +3420,102 @@ function extractFirstJsonObject(s) {
 // purely as a manual-review aid ("what else is this venue carrying?").
 // ---------------------------------------------------------------------------
 
-function aggregateOffApl(menuAnalyses) {
+// ---------------------------------------------------------------------------
+// Deciding whether an "off-APL" brand is really off-APL.
+//
+// The model is asked to keep these lists disjoint, and mostly it does — but
+// it's a fuzzy judgement made per menu, so the same batch can bill "Samuel
+// Adams Boston Lager" and simultaneously list "Sam Adams Boston Lager" as a
+// competitor product. Across 39 menus that inflates the review list and makes
+// coverage look worse than it is. Prompt wording can't fix an intermittent
+// judgement; a deterministic check after the fact can.
+// ---------------------------------------------------------------------------
+
+// Words that describe a product rather than name it. Menus append them freely
+// ("Ford's Gin", "Canyon Road Wines"); APLs usually don't.
+const DESCRIPTOR_WORDS = new Set([
+  'vodka', 'gin', 'rum', 'tequila', 'mezcal', 'whiskey', 'whisky', 'bourbon',
+  'scotch', 'brandy', 'cognac', 'liqueur', 'cordial', 'vermouth', 'beer',
+  'lager', 'ale', 'ipa', 'pilsner', 'stout', 'porter', 'cider', 'seltzer',
+  'wine', 'wines', 'champagne', 'prosecco', 'sparkling',
+  'na', 'nonalcoholic', 'non', 'alcoholic', 'hard', 'the', 'brand', 'brands',
+]);
+// Deliberately NOT descriptors: blanco, silver, reposado, añejo, 12, 1942.
+// Those distinguish one SKU from another — "Don Julio Blanco" and "Don Julio
+// Reposado" are different products and only one may be approved.
+
+function offAplTokens(raw) {
+  return String(raw || '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\([^)]*\)/g, ' ')
+    .toLowerCase()
+    .replace(/['\u2018\u2019]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .split(' ')
+    .filter((w) => w && !DESCRIPTOR_WORDS.has(w));
+}
+
+function editDistance(a, b) {
+  const m = a.length;
+  const n = b.length;
+  if (Math.abs(m - n) > 2) return 99;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) {
+      cur[j] = Math.min(
+        prev[j] + 1,
+        cur[j - 1] + 1,
+        prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)
+      );
+    }
+    prev = cur;
+  }
+  return prev[n];
+}
+
+// Two tokens are "the same word" if one abbreviates the other (Sam/Samuel) or
+// they differ by a single character in a long word (Lunazul/Lanazul).
+function tokensMatch(a, b) {
+  if (a === b) return true;
+  const [short, long] = a.length <= b.length ? [a, b] : [b, a];
+  if (short.length >= 3 && long.startsWith(short)) return true;
+  if (short.length >= 6 && editDistance(a, b) <= 1) return true;
+  return false;
+}
+
+// True when an off-APL entry is really an APL brand under different wording.
+// Deliberately conservative: every token must line up, so "Don Julio Reposado"
+// stays off-APL against an APL that only carries "Don Julio Blanco".
+function matchesAplBrand(offName, aplBrands) {
+  const off = offAplTokens(offName);
+  if (off.length === 0) return null;
+
+  for (const b of aplBrands || []) {
+    const apl = offAplTokens(b.name);
+    if (apl.length === 0) continue;
+
+    // Same number of meaningful tokens, matching position for position.
+    // Allowing the APL name to be one token shorter let a general entry
+    // swallow a specific SKU — "Hendrick's" absorbing "Hendrick's Neptunia",
+    // "Casa Noble Blanco" absorbing "Casamigos". Descriptor words are already
+    // stripped from both sides, so a genuine rewording lands on equal counts.
+    if (off.length !== apl.length) continue;
+    let ok = true;
+    for (let i = 0; i < off.length; i++) {
+      if (!tokensMatch(off[i], apl[i])) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) return b;
+  }
+  return null;
+}
+
+function aggregateOffApl(menuAnalyses, activeApl) {
   const map = {}; // lowercased name -> { name, category, locations:{loc:count}, total }
 
   menuAnalyses.forEach((menu) => {
@@ -3441,9 +3546,13 @@ function aggregateOffApl(menuAnalyses) {
     });
   });
 
-  return Object.values(map).sort((a, b) =>
-    a.name.toLowerCase().localeCompare(b.name.toLowerCase())
-  );
+  // Drop anything that is actually an APL brand written differently. It's
+  // already counted in brand_impressions, so leaving it here would show the
+  // same product as both billed and "not in APL" on the same report.
+  const aplBrands = activeApl?.brands || [];
+  return Object.values(map)
+    .filter((entry) => !matchesAplBrand(entry.name, aplBrands))
+    .sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
 }
 
 // ---------------------------------------------------------------------------
