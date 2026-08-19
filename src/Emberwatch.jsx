@@ -342,9 +342,44 @@ export default function Emberwatch() {
     }
   };
 
+  // Brand names that appear more than once in the active APL under different
+  // categories. These are the only ones that need a category tag in the prompt.
+  const ambiguousAplNames = (() => {
+    const byName = new Map();
+    for (const b of activeApl.brands) {
+      const k = String(b.name || '').trim().toLowerCase();
+      if (!byName.has(k)) byName.set(k, []);
+      byName.get(k).push(String(b.category || '').toLowerCase());
+    }
+    const out = new Set();
+    for (const [name, cats] of byName) {
+      if (cats.length < 2) continue;
+      // If the brand name already spells out one of its own categories, the
+      // repeat is a cross-listing of ONE product in two blocks (High Noon
+      // Peach Vodka Seltzer under both RTD's and Seltzer), not two different
+      // products. Tagging those would split one brand across two keys.
+      const selfIdentifying = cats.some((cat) =>
+        cat
+          .split(/[^a-z]+/)
+          .filter((w) => w.length >= 4)
+          .some((w) => name.includes(w))
+      );
+      if (!selfIdentifying) out.add(name);
+    }
+    return out;
+  })();
+
   const analyzeMenuWithClaude = async ({ name, base64 }) => {
     const brandList = activeApl.brands
-      .map((b) => `- ${b.name} (${b.supplier})`)
+      .map((b) => {
+        // Only surface the category when it actually disambiguates. Tagging
+        // every line adds noise; tagging the collisions is what stops
+        // "New Amsterdam Gin" being read as a non-APL product.
+        const dupe = ambiguousAplNames.has(b.name.trim().toLowerCase());
+        return dupe && b.category
+          ? `- ${b.name} [${b.category}] (${b.supplier})`
+          : `- ${b.name} (${b.supplier})`;
+      })
       .join('\n');
 
     const response = await fetch(`${API_BASE}/api/analyze`, {
@@ -518,6 +553,14 @@ Examples:
 - APL list shows: "- Macallan Glenrothes - 18 year old (Speyside) (EDRINGTON)" → JSON key: "Macallan Glenrothes 18 year old"
 
 Always put the supplier in the separate "supplier" field, never in the brand name key. Always strip trailing region/origin descriptors. The brand name should be clean and consistent so identical brands across multiple menus aggregate correctly.
+
+**BRACKETED CATEGORY TAGS.**
+A few APL lines carry a category in square brackets, like "- New Amsterdam [Vodka] (GALLO)" and "- New Amsterdam [Gin] (GALLO)". This happens when one brand name covers two different products from the same supplier. The bracket is there to help you tell them apart:
+- Match the menu mention to the right one using its category. "New Amsterdam Gin" on a menu matches the [Gin] line, not the [Vodka] line.
+- Both are on the APL. Neither is an off-APL brand. Never place a bracketed variant in off_apl_brands just because the menu spells out the category.
+- For these bracketed entries ONLY, include the category in the JSON key so the two do not merge: use "New Amsterdam (Gin)" and "New Amsterdam (Vodka)" as separate keys.
+- If the menu says only "New Amsterdam" with no category and context does not resolve it, count it under whichever variant the surrounding drinks suggest, and add a compliance note that the menu does not specify which product.
+- Lines WITHOUT brackets keep the plain brand name as the key, exactly as described elsewhere.
 
 **USE THE APL CANONICAL FORM AS THE KEY, NOT THE MENU'S WORDING.**
 Regardless of how the menu writes a brand, use the cleaned APL form as the JSON key. Examples:
@@ -3232,6 +3275,10 @@ function parseStructuredXlsxApl(workbook) {
     if (/ - \d+\s*\(.*\)\s*$/.test(t)) return true;
     if (/^[A-Z/\s\-]+ - \d+/.test(t)) return true;
     if (t.toUpperCase() === 'APL BAR MANDATE') return true;
+    if (t.toUpperCase() === 'BAR STANDARDS APL MANDATE') return true;
+    // Alterra-style APLs use this as a mid-zone divider before the
+    // non-mandatory brands. It is a section label, not a product.
+    if (t.toUpperCase() === 'OPTIONAL PRODUCTS') return true;
     return false;
   };
 
@@ -3260,10 +3307,31 @@ function parseStructuredXlsxApl(workbook) {
     'TAUPE', 'CORNFLOWER', 'ORANGE', 'TURQUOISE', 'SALMON', 'GREY', 'GRAY',
     'WHITE', 'GREEN', 'RED', 'BLUE', 'YELLOW', 'PINK', 'PURPLE', 'BLACK',
     'BROWN', 'BEIGE', 'TEAL', 'MAGENTA', 'CYAN', 'GOLD', 'SILVER', 'LAVENDER',
+    'SLATE', 'NAVY', 'OLIVE', 'MAROON', 'IVORY', 'CHARCOAL', 'MINT', 'PEACH',
     'COLOR / ICON', 'COLOR/ICON', 'COLOR', 'ICON',
   ]);
   const looksLikeLegendSupplier = (s) =>
     LEGEND_COLOR_WORDS.has(s.trim().toUpperCase());
+
+  // "VODKA - 11" -> "Vodka".  "WHITE WINE (750 mL) - 6" -> "White Wine".
+  // "TEQUILA / MEZCAL - 14" -> "Tequila / Mezcal".  Drops the count suffix,
+  // the volume parenthetical, and any trailing asterisk.
+  const cleanCategoryLabel = (raw) => {
+    let t = String(raw || '').trim();
+    if (!t) return '';
+    t = t.replace(/\s*-\s*\d+\s*$/, '');
+    t = t.replace(/\s*\([^)]*\)\s*/g, ' ');
+    t = t.replace(/\*/g, '').replace(/\s+/g, ' ').trim();
+    if (!t || t.toUpperCase() === 'SUPPLIER') return '';
+    if (t.length > 40) return '';
+    // Title-case the all-caps headers; leave mixed case ("Chardonnay") alone.
+    if (t === t.toUpperCase()) {
+      t = t
+        .toLowerCase()
+        .replace(/(^|[\s/])([a-z])/g, (m, p, ch) => p + ch.toUpperCase());
+    }
+    return t;
+  };
 
   for (const sheetName of workbook.SheetNames) {
     const sheet = workbook.Sheets[sheetName];
@@ -3299,8 +3367,16 @@ function parseStructuredXlsxApl(workbook) {
         }
         if (brandCol < 0) continue;
 
-        if (!zones.has(c)) zones.set(c, { brandCol, headerRows: new Set() });
+        // Remember the STYLE/VARIETAL column too — for BEER and WINE it holds
+        // a far more useful per-row category ("Chardonnay") than the block
+        // header ("WHITE WINE - 6") does.
+        const subCol = c - 1 > brandCol ? c - 1 : -1;
+
+        if (!zones.has(c)) {
+          zones.set(c, { brandCol, subCol, headerRows: new Set() });
+        }
         const zone = zones.get(c);
+        if (zone.subCol === -1 && subCol !== -1) zone.subCol = subCol;
         // A repeated header row that omits STYLE must not pull the zone
         // rightwards onto the sub-header column.
         zone.brandCol = Math.min(zone.brandCol, brandCol);
@@ -3313,8 +3389,17 @@ function parseStructuredXlsxApl(workbook) {
     // WHISKEY), each re-printing its own header row, so we scan every row and
     // skip the header rows rather than stopping at the first one.
     for (const [supplierCol, zone] of zones) {
+      // The category label lives in the brand column OF the header row
+      // ("VODKA - 11" sits directly left of "SUPPLIER"). Because categories
+      // stack down a zone, we track the most recent one as we descend.
+      let currentCategory = '';
+
       for (let r = 0; r <= maxRow; r++) {
-        if (zone.headerRows.has(r)) continue;
+        if (zone.headerRows.has(r)) {
+          const label = cleanCategoryLabel(cellAt(r, zone.brandCol));
+          if (label) currentCategory = label;
+          continue;
+        }
 
         const brandRaw = cellAt(r, zone.brandCol);
         const supplierRaw = cellAt(r, supplierCol);
@@ -3333,11 +3418,27 @@ function parseStructuredXlsxApl(workbook) {
         const name = brandRaw.replace(/\s*†\s*/g, ' ').replace(/\s+/g, ' ').trim();
         if (!name || looksLikeMarker(name)) continue;
 
-        const key = `${name.toLowerCase()}|${supplierRaw.toLowerCase()}`;
+        // A brand can legitimately appear twice under one supplier in two
+        // different categories — the OHM APL lists "New Amsterdam" under both
+        // VODKA and GIN, both Gallo. Keying on name+supplier alone deleted the
+        // second one, so the gin never reached the prompt and every menu
+        // mention of it was misfiled as off-APL. Category is part of identity.
+        const subType = zone.subCol >= 0 ? cellAt(r, zone.subCol) : '';
+        const category = subType && !looksLikeMarker(subType)
+          ? cleanCategoryLabel(subType)
+          : currentCategory;
+
+        const key = `${name.toLowerCase()}|${supplierRaw.toLowerCase()}|${String(
+          category
+        ).toLowerCase()}`;
         if (seen.has(key)) continue;
         seen.add(key);
 
-        brands.push({ name, supplier: supplierRaw });
+        brands.push(
+          category
+            ? { name, supplier: supplierRaw, category }
+            : { name, supplier: supplierRaw }
+        );
       }
     }
   }
