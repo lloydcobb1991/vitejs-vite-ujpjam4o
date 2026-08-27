@@ -15,6 +15,7 @@ import {
   Send,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
+import { PDFDocument } from 'pdf-lib';
 import MenuDropzone from './MenuDropzone';
 
 // ---------------------------------------------------------------------------
@@ -282,45 +283,62 @@ export default function Emberwatch() {
     setProgress('Converting PDFs...');
 
     try {
-      const fileDataPromises = uploadedFiles.map((file) => {
-        return new Promise((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => {
-            const base64 = reader.result.split(',')[1];
-            resolve({ name: file.name, base64 });
-          };
-          reader.onerror = reject;
-          reader.readAsDataURL(file);
-        });
-      });
-
-      const filesData = await Promise.all(fileDataPromises);
+      // Oversized files are split into page chunks here rather than failing
+      // with a 413 mid-run. Reading happens per-file inside the loop so a
+      // 39-menu batch doesn't hold every payload in memory at once.
       const menuAnalyses = [];
       const failedMenus = [];
+      const splitNotices = [];
       let accountFailure = null;
 
-      for (let i = 0; i < filesData.length; i++) {
-        const fileData = filesData[i];
-        setProgress(
-          `Analyzing ${fileData.name} (${i + 1}/${filesData.length})...`
-        );
+      for (let i = 0; i < uploadedFiles.length; i++) {
+        const file = uploadedFiles[i];
+        const label = `${file.name} (${i + 1}/${uploadedFiles.length})`;
 
-        // Isolate each menu. A single bad/unparseable response must NOT abort
-        // the whole batch — record the failure and keep going. This is what
-        // prevents "one menu out of 38 kills all 38."
         try {
-          const analysis = await analyzeMenuWithClaude(fileData);
+          setProgress(`Reading ${label}...`);
+          const chunks = await readMenuFileAsChunks(file);
+
+          if (chunks.length > 1) {
+            splitNotices.push({
+              filename: file.name,
+              parts: chunks.length,
+            });
+          }
+
+          const parts = [];
+          for (let c = 0; c < chunks.length; c++) {
+            setProgress(
+              chunks.length > 1
+                ? `Analyzing ${label} — part ${c + 1} of ${chunks.length}...`
+                : `Analyzing ${label}...`
+            );
+            parts.push(
+              await analyzeMenuWithClaude({
+                name: file.name,
+                base64: chunks[c],
+              })
+            );
+          }
+
+          const analysis =
+            parts.length === 1 ? parts[0] : mergeChunkAnalyses(parts);
+
           menuAnalyses.push({
-            location: resolveLocation(fileData.name),
-            filename: fileData.name,
+            location: resolveLocation(file.name),
+            filename: file.name,
+            partCount: chunks.length,
             ...analysis,
           });
         } catch (menuErr) {
-          console.error(`Failed to analyze ${fileData.name}:`, menuErr);
+          // Isolate each menu. A single bad/unparseable response must NOT abort
+          // the whole batch — record the failure and keep going. This is what
+          // prevents "one menu out of 38 kills all 38."
+          console.error(`Failed to analyze ${file.name}:`, menuErr);
           const msg = menuErr.message || String(menuErr);
           failedMenus.push({
-            filename: fileData.name,
-            location: resolveLocation(fileData.name),
+            filename: file.name,
+            location: resolveLocation(file.name),
             error: msg,
           });
           if (msg.startsWith('ACCOUNT:')) {
@@ -335,8 +353,8 @@ export default function Emberwatch() {
       if (accountFailure) {
         const attempted = menuAnalyses.length + failedMenus.length;
         throw new Error(
-          `${accountFailure} Stopped after ${attempted} of ${filesData.length} menus — ${
-            filesData.length - attempted
+          `${accountFailure} Stopped after ${attempted} of ${uploadedFiles.length} menus — ${
+            uploadedFiles.length - attempted
           } not attempted. Fix the account issue, then re-run the full batch.`
         );
       }
@@ -344,7 +362,7 @@ export default function Emberwatch() {
       // Only a total wipeout is a hard error. Any partial success still renders.
       if (menuAnalyses.length === 0) {
         throw new Error(
-          `All ${filesData.length} menus failed to analyze. First error: ${
+          `All ${uploadedFiles.length} menus failed to analyze. First error: ${
             failedMenus[0]?.error || 'unknown'
           }`
         );
@@ -354,7 +372,7 @@ export default function Emberwatch() {
       const aggregated = aggregateBySupplier(menuAnalyses);
       const offApl = aggregateOffApl(menuAnalyses, activeApl);
 
-      setResults({ menuAnalyses, aggregated, offApl, failedMenus });
+      setResults({ menuAnalyses, aggregated, offApl, failedMenus, splitNotices });
       setView('results');
       setProgress('');
     } catch (err) {
@@ -1379,8 +1397,175 @@ const normalizeBrandDisplay = (raw) =>
 // Deliberately conservative: it tidies obvious noise and stops. The user can
 // always overwrite it, and a wrong guess that looks plausible is worse than an
 // ugly one that prompts an edit.
+// ---------------------------------------------------------------------------
+// Oversized PDFs
+//
+// Anthropic caps a request at 32MB, and base64 inflates a file by about a
+// third, so the real ceiling is roughly 24MB of PDF — and the Railway proxy
+// rejects bodies well before that. Two menus in the August batch died on this
+// with a 413 and were simply never analyzed.
+//
+// We split rather than compress. Rasterising pages to JPEG would shrink them
+// reliably but throws away the text layer, and these numbers end up on a
+// supplier invoice; accuracy is worth more than convenience. Splitting keeps
+// the text layer intact and costs only extra API calls on the few files that
+// need it.
+// ---------------------------------------------------------------------------
+
+// Conservative: the Railway body limit is the binding constraint and we don't
+// know its exact value, so stay well under anything plausible.
+const MAX_CHUNK_BASE64_BYTES = 4_500_000;
+const MAX_PAGES_PER_CHUNK = 50; // Anthropic also caps PDFs at 100 pages
+
+function bytesToBase64(bytes) {
+  let binary = '';
+  const CHUNK = 0x8000; // avoid blowing the argument limit on large files
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode.apply(
+      null,
+      bytes.subarray(i, i + CHUNK)
+    );
+  }
+  return btoa(binary);
+}
+
+// Build one chunk PDF from a page range and return its base64, or null if the
+// range is still too large to send.
+async function buildChunk(srcDoc, startPage, endPage) {
+  const out = await PDFDocument.create();
+  const pages = await out.copyPages(
+    srcDoc,
+    Array.from({ length: endPage - startPage }, (_, k) => startPage + k)
+  );
+  pages.forEach((pg) => out.addPage(pg));
+  const bytes = await out.save();
+  const base64 = bytesToBase64(bytes);
+  return base64.length <= MAX_CHUNK_BASE64_BYTES ? base64 : null;
+}
+
+// Recursively halve a page range until each piece fits. Returns an array of
+// base64 strings, or throws if a single page is still too big — at that point
+// the page is mostly one enormous image and splitting can't help.
+async function splitRange(srcDoc, startPage, endPage, depth = 0) {
+  const pageCount = endPage - startPage;
+  if (pageCount <= 0) return [];
+
+  if (pageCount <= MAX_PAGES_PER_CHUNK) {
+    const base64 = await buildChunk(srcDoc, startPage, endPage);
+    if (base64) return [base64];
+  }
+
+  if (pageCount === 1) {
+    throw new Error(
+      `Page ${startPage + 1} is too large to send on its own even after splitting. It is probably a single high-resolution image — re-export that page at a lower resolution.`
+    );
+  }
+  if (depth > 12) {
+    throw new Error('Could not split this PDF small enough to analyze.');
+  }
+
+  const mid = startPage + Math.ceil(pageCount / 2);
+  const left = await splitRange(srcDoc, startPage, mid, depth + 1);
+  const right = await splitRange(srcDoc, mid, endPage, depth + 1);
+  return [...left, ...right];
+}
+
+// Read a File into one or more base64 payloads. Small files come back as a
+// single-element array and never touch pdf-lib.
+async function readMenuFileAsChunks(file) {
+  const arrayBuffer = await file.arrayBuffer();
+  const whole = bytesToBase64(new Uint8Array(arrayBuffer));
+  if (whole.length <= MAX_CHUNK_BASE64_BYTES) return [whole];
+
+  const srcDoc = await PDFDocument.load(arrayBuffer, {
+    ignoreEncryption: true,
+  });
+  return splitRange(srcDoc, 0, srcDoc.getPageCount());
+}
+
+// Fold several chunk analyses of ONE menu back into a single result. Counts
+// add up, context lists concatenate, and the compliance / off-APL arrays are
+// unioned. A brand mentioned on pages 1 and 40 of the same menu is still two
+// impressions, which is what happens today when the file is sent whole.
+function mergeChunkAnalyses(parts) {
+  const merged = {
+    brand_impressions: {},
+    compliance_issues: [],
+    off_apl_brands: [],
+  };
+  const seenOff = new Set();
+
+  for (const part of parts) {
+    for (const [brand, data] of Object.entries(part?.brand_impressions || {})) {
+      const key = normalizeBrandKey(brand);
+      let target = null;
+      for (const existing of Object.keys(merged.brand_impressions)) {
+        if (normalizeBrandKey(existing) === key) {
+          target = existing;
+          break;
+        }
+      }
+      if (!target) {
+        merged.brand_impressions[brand] = {
+          count: data.count || 0,
+          supplier: data.supplier || 'UNKNOWN',
+          cocktails: [...(data.cocktails || [])],
+        };
+      } else {
+        const t = merged.brand_impressions[target];
+        t.count += data.count || 0;
+        t.cocktails = [...(t.cocktails || []), ...(data.cocktails || [])];
+        if (!t.supplier || t.supplier === 'UNKNOWN') {
+          t.supplier = data.supplier || t.supplier;
+        }
+      }
+    }
+
+    for (const issue of part?.compliance_issues || []) {
+      merged.compliance_issues.push(issue);
+    }
+
+    for (const entry of part?.off_apl_brands || part?.off_apl || []) {
+      const name = (typeof entry === 'string' ? entry : entry?.name || '').trim();
+      if (!name) continue;
+      const k = name.toLowerCase();
+      if (seenOff.has(k)) {
+        const prior = merged.off_apl_brands.find(
+          (e) => String(e.name || '').toLowerCase() === k
+        );
+        if (prior && Array.isArray(entry?.where)) {
+          prior.where = [...(prior.where || []), ...entry.where];
+        }
+        continue;
+      }
+      seenOff.add(k);
+      merged.off_apl_brands.push(
+        typeof entry === 'string' ? { name: entry, where: [] } : { ...entry }
+      );
+    }
+  }
+
+  return merged;
+}
+
 function defaultLabelFromFilename(filename) {
   let t = String(filename || '').trim();
+
+  // Convention: everything before the first " - " is the group.
+  //   "Solitude - St Bernards - stbeez wine.pdf"  -> "Solitude"
+  //   "Palisades - Terrace Menu 25 26.pdf"        -> "Palisades"
+  // Folder structure is lost when files are uploaded, so a filename prefix is
+  // the only way to carry "which property is this" through the browser. Kept
+  // deliberately narrow — the prefix has to be short and there has to be
+  // something after it — so ordinary hyphenated names are untouched.
+  const dashParts = t.replace(/\.[A-Za-z0-9]{1,5}$/, '').split(' - ');
+  if (dashParts.length >= 2) {
+    const prefix = dashParts[0].trim();
+    const rest = dashParts.slice(1).join(' - ').trim();
+    if (prefix && rest && prefix.length <= 30 && !/\d{3}/.test(prefix)) {
+      return prefix.replace(/\s+/g, ' ');
+    }
+  }
   t = t.replace(/\.[A-Za-z0-9]{1,5}$/, '');          // extension
   // Repeat: browsers hand back "file (1) (1).pdf" after two downloads, and a
   // single pass leaves one behind.
@@ -1719,6 +1904,55 @@ function ResultsView({ results, activeApl, onNew, onExport, onOpenEmail }) {
           boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
         }}
       >
+        {results.splitNotices && results.splitNotices.length > 0 && (
+          <div
+            style={{
+              background: '#f4f8ff',
+              border: '2px solid #b9d3ff',
+              borderRadius: '12px',
+              padding: '18px 24px',
+              marginBottom: '24px',
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '10px',
+                color: '#1c4f9c',
+                fontWeight: '800',
+                fontSize: '15px',
+                marginBottom: '6px',
+              }}
+            >
+              <FileText size={18} color="#1c4f9c" />
+              {results.splitNotices.length} menu
+              {results.splitNotices.length > 1 ? 's were' : ' was'} too large to
+              send in one piece and{' '}
+              {results.splitNotices.length > 1 ? 'were' : 'was'} analyzed in
+              parts.
+            </div>
+            <div style={{ fontSize: '13px', color: '#2a5ea8', lineHeight: '1.7' }}>
+              {results.splitNotices.map((n, i) => (
+                <div key={i}>
+                  • <strong>{n.filename}</strong> — split into {n.parts} parts
+                </div>
+              ))}
+            </div>
+            <div
+              style={{
+                fontSize: '12px',
+                color: '#2a5ea8',
+                marginTop: '8px',
+                fontStyle: 'italic',
+              }}
+            >
+              Counts from every part are combined, so the totals below are for
+              the whole menu.
+            </div>
+          </div>
+        )}
+
         {results.failedMenus && results.failedMenus.length > 0 && (
           <div
             style={{
