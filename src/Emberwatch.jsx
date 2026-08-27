@@ -1600,13 +1600,23 @@ function filterIssues(issues, activeApl) {
     aplNames.size === 0 ||
     aplNames.has(String(name || '').trim().toLowerCase());
 
+  // Collapse repeats. The model reports the same misspelling once per place
+  // it occurs, so "Budlight - should read Bud Light" arrived twice on a menu
+  // that lists the Classic package twice. One note per distinct correction.
+  const seenIssue = new Set();
+
   return (issues || []).filter((i) => {
     const found = String(i.found_text || '').trim();
     const correct = String(i.correct_name || '').trim();
     if (!found || !correct) return false;
     if (found.toLowerCase() === correct.toLowerCase()) return false;
     if (found.length > 45) return false;
-    return isRealAplBrand(correct);
+    if (!isRealAplBrand(correct)) return false;
+
+    const key = `${found.toLowerCase()}|${correct.toLowerCase()}`;
+    if (seenIssue.has(key)) return false;
+    seenIssue.add(key);
+    return true;
   });
 }
 
@@ -4190,8 +4200,17 @@ ${issues
   .join('\n')}`
       : '';
 
+    // The suppression applied in aggregateOffApl cleans results.offApl, which
+    // feeds the screen and the CSV — but this builder reads the raw per-menu
+    // list, so "Sam Adams Boston Lager" was still reaching the venue email as
+    // a non-APL product while being billed under "Samuel Adams Boston Lager".
+    // Same check, same place in the pipeline it should always have been.
     const offList = menu.off_apl_brands || menu.off_apl || [];
     const offRows = (Array.isArray(offList) ? offList : [])
+      .filter((b) => {
+        const nm = String(typeof b === 'string' ? b : b?.name || '').trim();
+        return nm && !matchesAplBrand(nm, activeApl?.brands || []);
+      })
       .map((b) => {
         const name = String(typeof b === 'string' ? b : b?.name || '').trim();
         if (!name) return '';
