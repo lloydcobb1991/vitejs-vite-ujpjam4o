@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   Upload,
   Download,
@@ -15,6 +15,8 @@ import {
   Send,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
+import { PDFDocument } from 'pdf-lib';
+import MenuDropzone from './MenuDropzone';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -23,39 +25,53 @@ import * as XLSX from 'xlsx';
 // The Railway-hosted backend. Switching this URL is how you swap servers.
 const API_BASE = 'https://emberwatch-api-production.up.railway.app';
 
-// Default email map per supplier. These are EDITABLE in the review screen
-// before sending - this is just the prefill. Add or correct as you learn the
-// real contacts.
-const SUPPLIER_EMAILS = {
-  DIAGEO: 'reports@diageo.com',
-  'PERNOD RICARD': 'reports@pernod-ricard.com',
-  'BEAM SUNTORY': 'reports@beamsuntory.com',
-  CAMPARI: 'reports@campari.com',
-  BACARDI: 'reports@bacardi.com',
-  'MOET HENNESSY': 'reports@moethennessy.com',
-  GALLO: 'reports@gallo.com',
-  'FIFTH GENERATION': 'reports@fifthgeneration.com',
-  'BROWN FORMAN': 'reports@brown-forman.com',
-  'HEAVEN HILL': 'reports@heavenhill.com',
-  'REMY COINTREAU': 'reports@remy-cointreau.com',
-  'WILLIAM GRANT': 'reports@williamgrant.com',
-  SAZERAC: 'reports@sazerac.com',
-  PROXIMO: 'reports@proximospirits.com',
-  'MAISON FERRAND': 'reports@maisonferrand.com',
-  SERRALLES: 'reports@serralles.com',
-  CHOPIN: 'reports@chopinvodka.com',
-  'CASTLE BRANDS/PR': 'reports@castlebrandsinc.com',
-  'AVIATION/DIAGEO': 'reports@aviationgin.com',
-  'CASAMIGOS/DIAGEO': 'reports@casamigos.com',
-  'WOLF SPIRITS': 'reports@wolfspirits.com',
-  'LA GRITONA': 'reports@lagritonatequila.com',
-  BOSSCAL: 'reports@bosscalmezcal.com',
-  TRELLIS: 'reports@trellisspirits.com',
-  TERLATO: 'reports@terlato.com',
-  BRANCA: 'reports@brancausa.com',
-  'FEVER-TREE': 'reports@fever-tree.com',
-  MIONETTO: 'reports@mionetto.com',
-};
+// ---------------------------------------------------------------------------
+// Contacts. Venue-manager addresses live in Airtable and are reached through
+// the Railway API, never directly — an Airtable key in the frontend would ship
+// inside the browser bundle for anyone to read.
+//
+// Every call here degrades silently. If the /api/contacts endpoints aren't
+// deployed yet, the recipient UI still works exactly as normal; it just won't
+// remember addresses between runs.
+// ---------------------------------------------------------------------------
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+const isEmail = (s) => EMAIL_RE.test(String(s || '').trim());
+
+async function fetchContacts() {
+  try {
+    const res = await fetch(`${API_BASE}/api/contacts`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return Array.isArray(data?.contacts) ? data.contacts : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function saveContacts(entries) {
+  if (!entries || entries.length === 0) return;
+  try {
+    await fetch(`${API_BASE}/api/contacts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contacts: entries }),
+    });
+  } catch (_) {
+    // Non-fatal. The emails have already gone out by this point; losing an
+    // address-book entry is a nuisance, not a failure worth alarming anyone
+    // about mid-send.
+  }
+}
+
+// Contacts explicitly associated with a venue.
+function matchContacts(contacts, location) {
+  const loc = String(location || '').trim().toLowerCase();
+  if (!loc) return [];
+  return contacts.filter((c) =>
+    (c.locations || []).some((l) => String(l).trim().toLowerCase() === loc)
+  );
+}
 
 // ---------------------------------------------------------------------------
 // APL Brand Data
@@ -137,24 +153,48 @@ export default function Emberwatch() {
   const [progress, setProgress] = useState('');
   const [view, setView] = useState('upload'); // 'upload' | 'results' | 'email'
   const [customApl, setCustomApl] = useState(null); // { name, brands } or null
+  const [fileLabels, setFileLabels] = useState({}); // filename -> group label
   const [aplError, setAplError] = useState(null);
-  const fileInputRef = useRef(null);
   const aplInputRef = useRef(null);
 
   // Active APL: custom if uploaded, else built-in.
   const activeApl = customApl || { name: 'Built-in APL', brands: APL_DATA.brands };
 
-  const handleFileUpload = (e) => {
-    const files = Array.from(e.target.files);
+  const handleFilesChange = (files) => {
     setUploadedFiles(files);
     setResults(null);
     setError(null);
+    // Seed a default label for anything new, without clobbering labels the
+    // user has already edited for files that are still in the list.
+    setFileLabels((prev) => {
+      const next = {};
+      for (const f of files) {
+        next[f.name] = prev[f.name] ?? defaultLabelFromFilename(f.name);
+      }
+      return next;
+    });
+  };
+
+  const setFileLabel = (filename, value) => {
+    setFileLabels((prev) => ({ ...prev, [filename]: value }));
+  };
+
+  // Apply one label to every uploaded file — the common case when a whole
+  // batch belongs to a single property.
+  const setAllFileLabels = (value) => {
+    setFileLabels(() => {
+      const next = {};
+      for (const f of uploadedFiles) next[f.name] = value;
+      return next;
+    });
   };
 
   // ----- Custom APL upload -----
 
-  const handleAplUpload = async (e) => {
-    const file = e.target.files[0];
+  // Shared file-processing logic used by both the file-input change handler
+  // and the drag-and-drop handler. Both paths converge here so parsing and
+  // error handling stay consistent.
+  const processAplFile = async (file) => {
     if (!file) return;
 
     setAplError(null);
@@ -180,10 +220,14 @@ export default function Emberwatch() {
           // Flat parse couldn't find headers — try structured parsing
           brands = parseStructuredXlsxApl(workbook);
         }
-      } else {
+      } else if (ext === 'csv') {
         // CSV path
         const text = await file.text();
         brands = parseAplCsv(text);
+      } else {
+        throw new Error(
+          `Unsupported file type: .${ext}. Please upload a CSV or Excel file.`
+        );
       }
 
       if (brands.length === 0) {
@@ -198,9 +242,18 @@ export default function Emberwatch() {
       setAplError(err.message || 'Could not read this APL file.');
       setCustomApl(null);
     }
+  };
 
+  const handleAplUpload = async (e) => {
+    const file = e.target.files[0];
+    await processAplFile(file);
     // Reset the input so re-selecting the same file re-fires onChange
     if (aplInputRef.current) aplInputRef.current.value = '';
+  };
+
+  // Called by the drag-and-drop handler in UploadView with a File object
+  const handleAplDrop = async (file) => {
+    await processAplFile(file);
   };
 
   const clearCustomApl = () => {
@@ -214,44 +267,112 @@ export default function Emberwatch() {
       return;
     }
 
+    // A failed APL upload leaves customApl null, which silently reverts
+    // activeApl to the built-in list. Running 39 client menus against the
+    // wrong brand list produces a clean-looking, completely wrong report —
+    // far more dangerous than a crash. Refuse to run until it's resolved.
+    if (aplError) {
+      setError(
+        `The uploaded APL didn't parse, so Fire Watch would fall back to the ${APL_DATA.brands.length}-brand built-in list. Re-upload a valid APL, or click "Use Built-in" to run against the built-in list deliberately.`
+      );
+      return;
+    }
+
     setAnalyzing(true);
     setError(null);
     setProgress('Converting PDFs...');
 
     try {
-      const fileDataPromises = uploadedFiles.map((file) => {
-        return new Promise((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => {
-            const base64 = reader.result.split(',')[1];
-            resolve({ name: file.name, base64 });
-          };
-          reader.onerror = reject;
-          reader.readAsDataURL(file);
-        });
-      });
-
-      const filesData = await Promise.all(fileDataPromises);
+      // Oversized files are split into page chunks here rather than failing
+      // with a 413 mid-run. Reading happens per-file inside the loop so a
+      // 39-menu batch doesn't hold every payload in memory at once.
       const menuAnalyses = [];
+      const failedMenus = [];
+      const splitNotices = [];
+      let accountFailure = null;
 
-      for (let i = 0; i < filesData.length; i++) {
-        const fileData = filesData[i];
-        setProgress(
-          `Analyzing ${fileData.name} (${i + 1}/${filesData.length})...`
+      for (let i = 0; i < uploadedFiles.length; i++) {
+        const file = uploadedFiles[i];
+        const label = `${file.name} (${i + 1}/${uploadedFiles.length})`;
+
+        try {
+          setProgress(`Reading ${label}...`);
+          const chunks = await readMenuFileAsChunks(file);
+
+          if (chunks.length > 1) {
+            splitNotices.push({
+              filename: file.name,
+              parts: chunks.length,
+            });
+          }
+
+          const parts = [];
+          for (let c = 0; c < chunks.length; c++) {
+            setProgress(
+              chunks.length > 1
+                ? `Analyzing ${label} — part ${c + 1} of ${chunks.length}...`
+                : `Analyzing ${label}...`
+            );
+            parts.push(
+              await analyzeMenuWithClaude({
+                name: file.name,
+                base64: chunks[c],
+              })
+            );
+          }
+
+          const analysis =
+            parts.length === 1 ? parts[0] : mergeChunkAnalyses(parts);
+
+          menuAnalyses.push({
+            location: resolveLocation(file.name),
+            filename: file.name,
+            partCount: chunks.length,
+            ...analysis,
+          });
+        } catch (menuErr) {
+          // Isolate each menu. A single bad/unparseable response must NOT abort
+          // the whole batch — record the failure and keep going. This is what
+          // prevents "one menu out of 38 kills all 38."
+          console.error(`Failed to analyze ${file.name}:`, menuErr);
+          const msg = menuErr.message || String(menuErr);
+          failedMenus.push({
+            filename: file.name,
+            location: resolveLocation(file.name),
+            error: msg,
+          });
+          if (msg.startsWith('ACCOUNT:')) {
+            accountFailure = msg.replace('ACCOUNT: ', '');
+            break;
+          }
+        }
+      }
+
+      // An account-level abort means the run is INCOMPLETE, not partial.
+      // Fail loudly so nobody emails half a batch as billable impressions.
+      if (accountFailure) {
+        const attempted = menuAnalyses.length + failedMenus.length;
+        throw new Error(
+          `${accountFailure} Stopped after ${attempted} of ${uploadedFiles.length} menus — ${
+            uploadedFiles.length - attempted
+          } not attempted. Fix the account issue, then re-run the full batch.`
         );
+      }
 
-        const analysis = await analyzeMenuWithClaude(fileData);
-        menuAnalyses.push({
-          location: extractLocation(fileData.name),
-          filename: fileData.name,
-          ...analysis,
-        });
+      // Only a total wipeout is a hard error. Any partial success still renders.
+      if (menuAnalyses.length === 0) {
+        throw new Error(
+          `All ${uploadedFiles.length} menus failed to analyze. First error: ${
+            failedMenus[0]?.error || 'unknown'
+          }`
+        );
       }
 
       setProgress('Aggregating results...');
       const aggregated = aggregateBySupplier(menuAnalyses);
+      const offApl = aggregateOffApl(menuAnalyses, activeApl);
 
-      setResults({ menuAnalyses, aggregated });
+      setResults({ menuAnalyses, aggregated, offApl, failedMenus, splitNotices });
       setView('results');
       setProgress('');
     } catch (err) {
@@ -263,9 +384,44 @@ export default function Emberwatch() {
     }
   };
 
+  // Brand names that appear more than once in the active APL under different
+  // categories. These are the only ones that need a category tag in the prompt.
+  const ambiguousAplNames = (() => {
+    const byName = new Map();
+    for (const b of activeApl.brands) {
+      const k = String(b.name || '').trim().toLowerCase();
+      if (!byName.has(k)) byName.set(k, []);
+      byName.get(k).push(String(b.category || '').toLowerCase());
+    }
+    const out = new Set();
+    for (const [name, cats] of byName) {
+      if (cats.length < 2) continue;
+      // If the brand name already spells out one of its own categories, the
+      // repeat is a cross-listing of ONE product in two blocks (High Noon
+      // Peach Vodka Seltzer under both RTD's and Seltzer), not two different
+      // products. Tagging those would split one brand across two keys.
+      const selfIdentifying = cats.some((cat) =>
+        cat
+          .split(/[^a-z]+/)
+          .filter((w) => w.length >= 4)
+          .some((w) => name.includes(w))
+      );
+      if (!selfIdentifying) out.add(name);
+    }
+    return out;
+  })();
+
   const analyzeMenuWithClaude = async ({ name, base64 }) => {
     const brandList = activeApl.brands
-      .map((b) => `- ${b.name} (${b.supplier})`)
+      .map((b) => {
+        // Only surface the category when it actually disambiguates. Tagging
+        // every line adds noise; tagging the collisions is what stops
+        // "New Amsterdam Gin" being read as a non-APL product.
+        const dupe = ambiguousAplNames.has(b.name.trim().toLowerCase());
+        return dupe && b.category
+          ? `- ${b.name} [${b.category}] (${b.supplier})`
+          : `- ${b.name} (${b.supplier})`;
+      })
       .join('\n');
 
     const response = await fetch(`${API_BASE}/api/analyze`, {
@@ -383,9 +539,21 @@ When an APL brand is mentioned on the menu but the rendering is genuinely proble
 
 The distinction: off-APL = out of scope, ignore. APL brand rendered poorly = flag for client awareness.
 
+**SEPARATELY — OFF-APL BRANDS PRESENT (internal review only, NOT billed):**
+In addition to everything above, produce a SEPARATE list of the notable branded products that appear on this menu but are NOT in the APL. This is an awareness list so our team can eyeball what competing / non-APL brands the venue carries. It is completely independent from the impression count.
+
+Hard rules for this list:
+- These do NOT count as impressions. Do NOT add them to brand_impressions.
+- These are NOT compliance issues. Do NOT add them to compliance_issues.
+- Include only NAMED, branded products — proper-noun spirit/beer/wine/liqueur/RTD brands that are not in the APL. Examples on a typical menu: "Ole Smoky Salty Caramel Whiskey", "Don Julio Reposado", "Skrewball Peanut Butter Whiskey", non-APL Seedlip variants (e.g. "Seedlip Grove 42", "Seedlip Garden 108"), "Bulleit" if absent from the APL, competitor beers/wines by name.
+- Do NOT include generic ingredients or non-branded items: juices, "simple syrup", "mint", "lime juice", "egg white", "house-made cinnamon syrup", produce, or category words like "vodka" / "tequila". Only real brand names.
+- List each off-APL brand ONCE, with every place it appears collected in "where".
+
+Return this as an "off_apl_brands" array. If you find none, return an empty array [].
+
 **ALWAYS return the compliance_issues array.** If you genuinely find no compliance issues, return an empty array like "compliance_issues": []. Never omit the field. Always look for issues before declaring there are none — be proactive about finding them.
 
-**RETURN ONLY THIS JSON STRUCTURE - no other fields, no recipe text, no cocktail list:**
+**RETURN ONLY THIS JSON STRUCTURE - these three top-level fields only, no recipe text:**
 \`\`\`json
 {
   "brand_impressions": {
@@ -401,6 +569,13 @@ The distinction: off-APL = out of scope, ignore. APL brand rendered poorly = fla
       "found_text": "Jack",
       "correct_name": "Jack Daniel's Tennessee Whiskey",
       "cocktail": "Cocktail Name"
+    }
+  ],
+  "off_apl_brands": [
+    {
+      "name": "Ole Smoky Salty Caramel Whiskey",
+      "category": "whiskey",
+      "where": ["Ole Skrewball Old Fashioned", "Salty Caramel Whiskey Espresso Martini", "Spirits List"]
     }
   ]
 }
@@ -421,6 +596,14 @@ Examples:
 
 Always put the supplier in the separate "supplier" field, never in the brand name key. Always strip trailing region/origin descriptors. The brand name should be clean and consistent so identical brands across multiple menus aggregate correctly.
 
+**BRACKETED CATEGORY TAGS.**
+A few APL lines carry a category in square brackets, like "- New Amsterdam [Vodka] (GALLO)" and "- New Amsterdam [Gin] (GALLO)". This happens when one brand name covers two different products from the same supplier. The bracket is there to help you tell them apart:
+- Match the menu mention to the right one using its category. "New Amsterdam Gin" on a menu matches the [Gin] line, not the [Vodka] line.
+- Both are on the APL. Neither is an off-APL brand. Never place a bracketed variant in off_apl_brands just because the menu spells out the category.
+- For these bracketed entries ONLY, include the category in the JSON key so the two do not merge: use "New Amsterdam (Gin)" and "New Amsterdam (Vodka)" as separate keys.
+- If the menu says only "New Amsterdam" with no category and context does not resolve it, count it under whichever variant the surrounding drinks suggest, and add a compliance note that the menu does not specify which product.
+- Lines WITHOUT brackets keep the plain brand name as the key, exactly as described elsewhere.
+
 **USE THE APL CANONICAL FORM AS THE KEY, NOT THE MENU'S WORDING.**
 Regardless of how the menu writes a brand, use the cleaned APL form as the JSON key. Examples:
 - Menu says "Oban 14yr" → APL has "Oban - 14 year old (Highland)" → JSON key: "Oban 14 year old"
@@ -438,7 +621,57 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
     });
 
     if (!response.ok) {
-      throw new Error(`API error: ${response.status}`);
+      // Surface WHY it failed, not just the status. The body is where Anthropic
+      // (or the Railway proxy) explains itself: page limits, size limits,
+      // "prompt is too long", body-parser rejections, etc. Without this we were
+      // throwing away the only useful diagnostic.
+      let detail = '';
+      try {
+        const errText = await response.text();
+        try {
+          const errJson = JSON.parse(errText);
+          detail =
+            errJson?.error?.message ||
+            errJson?.message ||
+            (typeof errJson?.error === 'string' ? errJson.error : '') ||
+            errText;
+        } catch (_) {
+          detail = errText; // not JSON — use raw text (e.g. Express "PayloadTooLargeError")
+        }
+      } catch (_) {
+        // couldn't read body — fall back to bare status
+      }
+      detail = String(detail || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 300);
+      // Classify account-level failures separately. These fail EVERY
+      // remaining menu identically, so the batch loop aborts on them rather
+      // than grinding through 39 more calls and reporting 40 vague errors.
+      if (
+        response.status === 401 ||
+        /authentication|invalid x-api-key/i.test(detail)
+      ) {
+        throw new Error(
+          'ACCOUNT: API key rejected (401). Check ANTHROPIC_API_KEY on Railway.'
+        );
+      }
+      if (
+        response.status === 402 ||
+        /credit balance|insufficient|billing|quota|subscription/i.test(detail)
+      ) {
+        throw new Error(
+          `ACCOUNT: Anthropic billing or credit problem — not a menu problem. ${detail}`
+        );
+      }
+      if (response.status === 429) {
+        throw new Error(
+          `ACCOUNT: Rate limited (429). Wait a minute and re-run. ${detail}`
+        );
+      }
+      throw new Error(
+        `API error: ${response.status}${detail ? ` — ${detail}` : ''}`
+      );
     }
 
     const data = await response.json();
@@ -447,18 +680,22 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
       .map((item) => item.text)
       .join('\n');
 
-    const jsonText = text
-      .replace(/```json\n?/g, '')
-      .replace(/```\n?/g, '')
-      .trim();
-    return JSON.parse(jsonText);
+    // Robust parse. The old code did a single JSON.parse on the whole string,
+    // which throws "unexpected non-whitespace character after JSON data" the
+    // moment the model appends ANY trailing text (a note, a second block, a
+    // stray sentence) after the JSON. parseClaudeJson tolerates that.
+    return parseClaudeJson(text);
   };
 
-  const extractLocation = (filename) => {
-    if (filename.includes('NYC')) return 'New York City';
-    if (filename.includes('LV')) return 'Las Vegas';
-    if (filename.includes('DC')) return 'Washington DC';
-    return filename.replace(/[^a-zA-Z0-9]/g, ' ');
+  // Which group a menu belongs to. Defaults to a tidied filename, but the
+  // label the user typed on the upload screen always wins. Grouping is
+  // deliberately free text: reports go out per property most of the time, but
+  // sometimes per region, so hard-coding a hierarchy would be wrong by
+  // next quarter.
+  const resolveLocation = (filename) => {
+    const typed = fileLabels[filename];
+    if (typed && typed.trim()) return typed.trim();
+    return defaultLabelFromFilename(filename);
   };
 
   const aggregateBySupplier = (menuAnalyses) => {
@@ -470,7 +707,7 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
     menuAnalyses.forEach((menu) => {
       Object.entries(menu.brand_impressions || {}).forEach(([brand, data]) => {
         const supplier = data.supplier || 'UNKNOWN';
-        const brandKey = brand.trim().toLowerCase();
+        const brandKey = normalizeBrandKey(brand);
 
         if (!supplierTotals[supplier]) {
           supplierTotals[supplier] = { total: 0, brands: {}, locations: {} };
@@ -479,7 +716,7 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
 
         // Pick display name: first one we see for this normalized key
         if (!canonicalDisplayName[supplier][brandKey]) {
-          canonicalDisplayName[supplier][brandKey] = brand.trim();
+          canonicalDisplayName[supplier][brandKey] = normalizeBrandDisplay(brand);
         }
         const displayName = canonicalDisplayName[supplier][brandKey];
 
@@ -500,49 +737,75 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
   // brand_impressions map, matching case-insensitively.
   const findMenuBrandCount = (menu, brandName) => {
     if (!menu || !menu.brand_impressions) return 0;
-    const target = brandName.trim().toLowerCase();
+    // Sum rather than return-first: one menu can carry both "Brand (Gin)" and
+    // "Brand [Gin]" if the model wavered mid-response, and both belong here.
+    const target = normalizeBrandKey(brandName);
+    let total = 0;
     for (const [name, data] of Object.entries(menu.brand_impressions)) {
-      if (name.trim().toLowerCase() === target) {
-        return data.count || 0;
+      if (normalizeBrandKey(name) === target) {
+        total += data.count || 0;
       }
     }
-    return 0;
+    return total;
   };
 
   const exportToCSV = () => {
     if (!results) return;
 
-    const rows = [
-      ['Supplier', 'Brand', 'NYC', 'Las Vegas', 'Washington DC', 'Total'],
-    ];
+    const rows = [];
+
+    // Columns come from the groups actually present in this batch, not from a
+    // fixed list of cities. The old header was hard-coded to NYC / Las Vegas /
+    // Washington DC, so every other client exported a wall of zeros next to a
+    // correct total.
+    const groups = [...new Set(results.menuAnalyses.map((m) => m.location))]
+      .filter(Boolean)
+      .sort((a, b) => a.localeCompare(b));
+
+    // Several menus can share one group — a property with a lunch menu, a
+    // drinks menu and a banquet playbook is still one property — so sum across
+    // every menu in the group rather than taking the first match.
+    const countForGroup = (group, brand) =>
+      results.menuAnalyses
+        .filter((m) => m.location === group)
+        .reduce((n, m) => n + findMenuBrandCount(m, brand), 0);
+
+    const csvCell = (v) => {
+      const t = String(v ?? '');
+      return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t;
+    };
+
+    rows.push(['Supplier', 'Brand', ...groups, 'Total']);
 
     results.aggregated.forEach((supplier) => {
       Object.entries(supplier.brands).forEach(([brand, totalCount]) => {
-        const nycCount = findMenuBrandCount(
-          results.menuAnalyses.find((m) => m.location === 'New York City'),
-          brand
-        );
-        const lvCount = findMenuBrandCount(
-          results.menuAnalyses.find((m) => m.location === 'Las Vegas'),
-          brand
-        );
-        const dcCount = findMenuBrandCount(
-          results.menuAnalyses.find((m) => m.location === 'Washington DC'),
-          brand
-        );
-
         rows.push([
           supplier.supplier,
           brand,
-          nycCount,
-          lvCount,
-          dcCount,
+          ...groups.map((g) => countForGroup(g, brand)),
           totalCount,
         ]);
       });
     });
 
-    const csv = rows.map((row) => row.join(',')).join('\n');
+    // Off-APL brands (informational — not billed). Appended as a clearly
+    // separated block so it can't be confused with the impression rows above.
+    if (results.offApl && results.offApl.length > 0) {
+      rows.push([]);
+      rows.push(['NOT IN APL (for review — not billed, not emailed)']);
+      rows.push(['Brand', 'Category', 'Locations', 'Mentions']);
+      results.offApl.forEach((b) => {
+        const locs = Object.entries(b.locations)
+          .map(([loc, c]) => `${loc} (${c})`)
+          .join('; ');
+        // Quote the free-text fields so any stray commas don't break columns.
+        rows.push([csvCell(b.name), csvCell(b.category || ''), csvCell(locs), b.total]);
+      });
+    }
+
+    const csv = rows
+      .map((row) => row.map((cell) => csvCell(cell)).join(','))
+      .join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -585,24 +848,23 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
           customApl={customApl}
           aplError={aplError}
           aplInputRef={aplInputRef}
-          onPickFiles={() => fileInputRef.current?.click()}
           onPickApl={() => aplInputRef.current?.click()}
           onAplUpload={handleAplUpload}
+          onAplDrop={handleAplDrop}
           onClearApl={clearCustomApl}
-          onFileUpload={handleFileUpload}
-          onDropFiles={(files) => {
-            setUploadedFiles(files);
-            setResults(null);
-            setError(null);
-          }}
+          onFilesChange={handleFilesChange}
+          fileLabels={fileLabels}
+          onFileLabelChange={setFileLabel}
+          onApplyLabelToAll={setAllFileLabels}
+          defaultLabelFor={defaultLabelFromFilename}
           onAnalyze={analyzeMenus}
-          fileInputRef={fileInputRef}
         />
       )}
 
       {view === 'results' && results && (
         <ResultsView
           results={results}
+          activeApl={activeApl}
           onNew={() => {
             setResults(null);
             setUploadedFiles([]);
@@ -616,6 +878,7 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
       {view === 'email' && results && (
         <EmailReportView
           results={results}
+          activeApl={activeApl}
           onBack={() => setView('results')}
         />
       )}
@@ -636,26 +899,68 @@ function UploadView({
   customApl,
   aplError,
   aplInputRef,
-  onPickFiles,
   onPickApl,
   onAplUpload,
+  onAplDrop,
   onClearApl,
-  onFileUpload,
-  onDropFiles,
+  onFilesChange,
+  fileLabels,
+  onFileLabelChange,
+  onApplyLabelToAll,
+  defaultLabelFor,
   onAnalyze,
-  fileInputRef,
 }) {
+  // Local drag state so the APL card can highlight while a file is being
+  // dragged over it. We use a counter (not a boolean) because
+  // dragEnter/dragLeave fires on children too — otherwise the highlight
+  // would flicker when the user drags across nested elements.
+  const [aplDragDepth, setAplDragDepth] = useState(0);
+  const isAplDragActive = aplDragDepth > 0;
+
+  const handleAplDragEnter = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setAplDragDepth((d) => d + 1);
+  };
+  const handleAplDragLeave = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setAplDragDepth((d) => Math.max(0, d - 1));
+  };
+  const handleAplDragOver = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+  const handleAplFileDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setAplDragDepth(0);
+    const file = e.dataTransfer?.files?.[0];
+    if (file && onAplDrop) {
+      onAplDrop(file);
+    }
+  };
+
   return (
     <div style={{ width: '98%', margin: '0 auto', padding: '0 20px' }}>
-      {/* APL selection panel */}
+      {/* APL selection panel — supports both click-to-upload and drag-and-drop */}
       <div
+        onDragEnter={handleAplDragEnter}
+        onDragLeave={handleAplDragLeave}
+        onDragOver={handleAplDragOver}
+        onDrop={handleAplFileDrop}
         style={{
-          background: 'white',
+          background: isAplDragActive ? '#fff5f5' : 'white',
           borderRadius: '16px',
           padding: '24px 32px',
           marginBottom: '24px',
           boxShadow: '0 2px 8px rgba(0,0,0,0.06)',
-          border: customApl ? '2px solid #da291c' : '2px solid #ececec',
+          border: isAplDragActive
+            ? '2px dashed #da291c'
+            : customApl
+              ? '2px solid #da291c'
+              : '2px solid #ececec',
+          transition: 'background 0.15s ease, border-color 0.15s ease',
         }}
       >
         <div
@@ -795,7 +1100,8 @@ function UploadView({
           Upload a CSV or Excel file with{' '}
           <strong style={{ color: '#666' }}>Brand Name</strong> and{' '}
           <strong style={{ color: '#666' }}>Supplier</strong> columns to use a
-          client-specific list instead of the built-in.
+          client-specific list instead of the built-in.{' '}
+          <span style={{ color: '#bbb' }}>· Or drag your APL file here.</span>
         </div>
       </div>
 
@@ -807,123 +1113,188 @@ function UploadView({
           boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
         }}
       >
-        <div
-          style={{
-            border: '3px dashed #da291c',
-            borderRadius: '16px',
-            padding: '60px 40px',
-            textAlign: 'center',
-            background: '#fafafa',
-            marginBottom: '30px',
-            transition: 'all 0.3s ease',
-          }}
-          onDragOver={(e) => e.preventDefault()}
-          onDrop={(e) => {
-            e.preventDefault();
-            const files = Array.from(e.dataTransfer.files).filter(
-              (f) => f.type === 'application/pdf'
-            );
-            if (files.length) onDropFiles(files);
-          }}
-        >
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".pdf"
-            multiple
-            onChange={onFileUpload}
-            style={{ display: 'none' }}
-          />
-
-          <FileText
-            size={64}
-            color="#da291c"
-            style={{ marginBottom: '24px', opacity: 0.7 }}
-          />
-
-          <button
-            onClick={onPickFiles}
-            style={{
-              background: 'linear-gradient(135deg, #da291c 0%, #ff6b35 100%)',
-              color: 'white',
-              border: 'none',
-              padding: '20px 48px',
-              borderRadius: '12px',
-              fontSize: '18px',
-              fontWeight: '800',
-              cursor: 'pointer',
-              marginBottom: '24px',
-              boxShadow: '0 8px 24px rgba(218, 41, 28, 0.4)',
-              textTransform: 'uppercase',
-              letterSpacing: '1px',
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: '12px',
-            }}
-          >
-            <Upload size={20} />
-            Select Menu PDFs
-          </button>
-
-          <p style={{ color: '#999', fontSize: '15px', margin: 0 }}>
-            or drag and drop files here
-          </p>
-        </div>
+        <MenuDropzone
+          files={uploadedFiles}
+          onFilesChange={onFilesChange}
+          disabled={analyzing}
+        />
 
         {uploadedFiles.length > 0 && (
           <div
             style={{
-              background: '#f0f9f4',
+              margin: '28px 0 8px',
+              padding: '24px 28px',
+              background: '#fafafa',
+              border: '2px solid #ececec',
               borderRadius: '12px',
-              padding: '30px',
-              marginBottom: '30px',
-              border: '2px solid #28a745',
             }}
           >
             <div
               style={{
                 display: 'flex',
-                alignItems: 'center',
+                justifyContent: 'space-between',
+                alignItems: 'flex-end',
+                flexWrap: 'wrap',
                 gap: '12px',
-                marginBottom: '20px',
+                marginBottom: '6px',
               }}
             >
-              <CheckCircle size={24} color="#28a745" />
-              <strong style={{ fontSize: '18px', color: '#28a745' }}>
-                {uploadedFiles.length} file
-                {uploadedFiles.length > 1 ? 's' : ''} ready
-              </strong>
-            </div>
-            <div style={{ display: 'grid', gap: '10px' }}>
-              {uploadedFiles.map((f, i) => (
+              <div>
                 <div
-                  key={i}
                   style={{
-                    background: 'white',
-                    padding: '14px 20px',
-                    borderRadius: '8px',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '12px',
-                    border: '2px solid #e8e8e8',
-                    fontWeight: '600',
-                    color: '#1a1a1a',
+                    fontSize: '11px',
+                    fontWeight: '800',
+                    color: '#999',
+                    letterSpacing: '2px',
+                    textTransform: 'uppercase',
                   }}
                 >
-                  <FileText size={18} color="#da291c" />
-                  {f.name}
+                  Report Grouping
+                </div>
+                <div
+                  style={{
+                    fontSize: '13px',
+                    color: '#666',
+                    marginTop: '4px',
+                    fontWeight: '500',
+                    lineHeight: '1.6',
+                    maxWidth: '640px',
+                  }}
+                >
+                  These become the columns in the export and one email per
+                  group. Give several menus the same label to roll them up —
+                  a property with a lunch menu, a drinks menu and a banquet
+                  playbook is still one property.
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  const first = uploadedFiles[0];
+                  const seed =
+                    (first && fileLabels[first.name]) ||
+                    (first && defaultLabelFor(first.name)) ||
+                    '';
+                  const value = window.prompt(
+                    'Label every uploaded menu as:',
+                    seed
+                  );
+                  if (value !== null && value.trim()) {
+                    onApplyLabelToAll(value.trim());
+                  }
+                }}
+                disabled={analyzing}
+                style={{
+                  background: 'white',
+                  color: '#da291c',
+                  border: '2px solid #da291c',
+                  padding: '10px 18px',
+                  borderRadius: '8px',
+                  fontSize: '12px',
+                  fontWeight: '800',
+                  cursor: analyzing ? 'not-allowed' : 'pointer',
+                  textTransform: 'uppercase',
+                  letterSpacing: '1px',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                Same label for all
+              </button>
+            </div>
+
+            <div
+              style={{
+                display: 'grid',
+                gap: '8px',
+                marginTop: '18px',
+                maxHeight: '340px',
+                overflowY: 'auto',
+                overflowX: 'hidden',
+              }}
+            >
+              {uploadedFiles.map((f) => (
+                <div
+                  key={f.name}
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)',
+                    gap: '12px',
+                    alignItems: 'center',
+                  }}
+                >
+                  <div
+                    title={f.name}
+                    style={{
+                      fontSize: '13px',
+                      color: '#888',
+                      fontWeight: '600',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {f.name}
+                  </div>
+                  <input
+                    type="text"
+                    value={fileLabels[f.name] ?? ''}
+                    disabled={analyzing}
+                    placeholder={defaultLabelFor(f.name)}
+                    onChange={(e) => onFileLabelChange(f.name, e.target.value)}
+                    style={{
+                      width: '100%',
+                      padding: '9px 12px',
+                      fontSize: '14px',
+                      border: '2px solid #ddd',
+                      borderRadius: '8px',
+                      fontWeight: '700',
+                      color: '#1a1a1a',
+                      background: 'white',
+                    }}
+                  />
                 </div>
               ))}
+            </div>
+
+            <div
+              style={{
+                marginTop: '14px',
+                fontSize: '12px',
+                color: '#999',
+                fontWeight: '600',
+              }}
+            >
+              {new Set(
+                uploadedFiles.map(
+                  (f) =>
+                    (fileLabels[f.name] || '').trim() || defaultLabelFor(f.name)
+                )
+              ).size}{' '}
+              group
+              {new Set(
+                uploadedFiles.map(
+                  (f) =>
+                    (fileLabels[f.name] || '').trim() || defaultLabelFor(f.name)
+                )
+              ).size === 1
+                ? ''
+                : 's'}{' '}
+              across {uploadedFiles.length} menu
+              {uploadedFiles.length === 1 ? '' : 's'}
             </div>
           </div>
         )}
 
         <button
           onClick={onAnalyze}
-          disabled={analyzing || uploadedFiles.length === 0}
+          disabled={analyzing || uploadedFiles.length === 0 || !!aplError}
+          title={
+            aplError
+              ? 'Resolve the APL error above before analyzing'
+              : ''
+          }
           style={{
             width: '100%',
-            background: analyzing ? '#999' : '#da291c',
+            background: analyzing || aplError ? '#999' : '#da291c',
             color: 'white',
             border: 'none',
             padding: '28px',
@@ -931,7 +1302,7 @@ function UploadView({
             fontSize: '24px',
             fontWeight: '900',
             cursor:
-              analyzing || uploadedFiles.length === 0
+              analyzing || uploadedFiles.length === 0 || aplError
                 ? 'not-allowed'
                 : 'pointer',
             textTransform: 'uppercase',
@@ -984,11 +1355,365 @@ function UploadView({
   );
 }
 
+// ---------------------------------------------------------------------------
+// Compliance-note hygiene, shared by the results screen and the email builder
+// so the two can't drift apart.
+//
+// The model reliably produces three kinds of junk note: ones where the menu
+// already matches the APL exactly (and the note itself says so), ones where
+// correct_name is prose like "Not in APL" rather than a brand, and ones where
+// found_text is a paragraph of reasoning instead of the string on the menu.
+// None of them survive here.
+// ---------------------------------------------------------------------------
+
+// The model is asked to key category variants as "Brand (Category)", but it
+// sometimes echoes the APL's own "Brand [Category]" bracket form instead.
+// On one menu that's cosmetic; across a 39-menu batch the two forms land in
+// separate rows and the brand fragments. Normalising here is deterministic —
+// it doesn't depend on the model following formatting instructions.
+const normalizeBrandKey = (raw) =>
+  String(raw || '')
+    .replace(/\[([^\]]*)\]/g, '($1)')
+    .replace(/\s*\(\s*/g, ' (')
+    .replace(/\s*\)\s*/g, ') ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+
+// Same normalisation, but preserving case for what's shown on screen and in
+// the CSV. Bracket form becomes paren form so one brand reads one way.
+const normalizeBrandDisplay = (raw) =>
+  String(raw || '')
+    .replace(/\[([^\]]*)\]/g, '($1)')
+    .replace(/\s*\(\s*/g, ' (')
+    .replace(/\s*\)\s*/g, ') ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+// Turn a menu filename into a readable default group label.
+//   "w25_JAH_v3b.pdf"                -> "W25 JAH"
+//   "EmbassyDenton-EDITS (1).pdf"    -> "Embassy Denton"
+//   "Snow Summit F B Playbook.pdf"   -> "Snow Summit F B Playbook"
+// Deliberately conservative: it tidies obvious noise and stops. The user can
+// always overwrite it, and a wrong guess that looks plausible is worse than an
+// ugly one that prompts an edit.
+// ---------------------------------------------------------------------------
+// Oversized PDFs
+//
+// Anthropic caps a request at 32MB, and base64 inflates a file by about a
+// third, so the real ceiling is roughly 24MB of PDF — and the Railway proxy
+// rejects bodies well before that. Two menus in the August batch died on this
+// with a 413 and were simply never analyzed.
+//
+// We split rather than compress. Rasterising pages to JPEG would shrink them
+// reliably but throws away the text layer, and these numbers end up on a
+// supplier invoice; accuracy is worth more than convenience. Splitting keeps
+// the text layer intact and costs only extra API calls on the few files that
+// need it.
+// ---------------------------------------------------------------------------
+
+// Conservative: the Railway body limit is the binding constraint and we don't
+// know its exact value, so stay well under anything plausible.
+const MAX_CHUNK_BASE64_BYTES = 4_500_000;
+const MAX_PAGES_PER_CHUNK = 50; // Anthropic also caps PDFs at 100 pages
+
+function bytesToBase64(bytes) {
+  let binary = '';
+  const CHUNK = 0x8000; // avoid blowing the argument limit on large files
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode.apply(
+      null,
+      bytes.subarray(i, i + CHUNK)
+    );
+  }
+  return btoa(binary);
+}
+
+// Build one chunk PDF from a page range and return its base64, or null if the
+// range is still too large to send.
+async function buildChunk(srcDoc, startPage, endPage) {
+  const out = await PDFDocument.create();
+  const pages = await out.copyPages(
+    srcDoc,
+    Array.from({ length: endPage - startPage }, (_, k) => startPage + k)
+  );
+  pages.forEach((pg) => out.addPage(pg));
+  const bytes = await out.save();
+  const base64 = bytesToBase64(bytes);
+  return base64.length <= MAX_CHUNK_BASE64_BYTES ? base64 : null;
+}
+
+// Recursively halve a page range until each piece fits. Returns an array of
+// base64 strings, or throws if a single page is still too big — at that point
+// the page is mostly one enormous image and splitting can't help.
+async function splitRange(srcDoc, startPage, endPage, depth = 0) {
+  const pageCount = endPage - startPage;
+  if (pageCount <= 0) return [];
+
+  if (pageCount <= MAX_PAGES_PER_CHUNK) {
+    const base64 = await buildChunk(srcDoc, startPage, endPage);
+    if (base64) return [base64];
+  }
+
+  if (pageCount === 1) {
+    throw new Error(
+      `Page ${startPage + 1} is too large to send on its own even after splitting. It is probably a single high-resolution image — re-export that page at a lower resolution.`
+    );
+  }
+  if (depth > 12) {
+    throw new Error('Could not split this PDF small enough to analyze.');
+  }
+
+  const mid = startPage + Math.ceil(pageCount / 2);
+  const left = await splitRange(srcDoc, startPage, mid, depth + 1);
+  const right = await splitRange(srcDoc, mid, endPage, depth + 1);
+  return [...left, ...right];
+}
+
+// Read a File into one or more base64 payloads. Small files come back as a
+// single-element array and never touch pdf-lib.
+async function readMenuFileAsChunks(file) {
+  const arrayBuffer = await file.arrayBuffer();
+  const whole = bytesToBase64(new Uint8Array(arrayBuffer));
+  if (whole.length <= MAX_CHUNK_BASE64_BYTES) return [whole];
+
+  const srcDoc = await PDFDocument.load(arrayBuffer, {
+    ignoreEncryption: true,
+  });
+  return splitRange(srcDoc, 0, srcDoc.getPageCount());
+}
+
+// Fold several chunk analyses of ONE menu back into a single result. Counts
+// add up, context lists concatenate, and the compliance / off-APL arrays are
+// unioned. A brand mentioned on pages 1 and 40 of the same menu is still two
+// impressions, which is what happens today when the file is sent whole.
+function mergeChunkAnalyses(parts) {
+  const merged = {
+    brand_impressions: {},
+    compliance_issues: [],
+    off_apl_brands: [],
+  };
+  const seenOff = new Set();
+
+  for (const part of parts) {
+    for (const [brand, data] of Object.entries(part?.brand_impressions || {})) {
+      const key = normalizeBrandKey(brand);
+      let target = null;
+      for (const existing of Object.keys(merged.brand_impressions)) {
+        if (normalizeBrandKey(existing) === key) {
+          target = existing;
+          break;
+        }
+      }
+      if (!target) {
+        merged.brand_impressions[brand] = {
+          count: data.count || 0,
+          supplier: data.supplier || 'UNKNOWN',
+          cocktails: [...(data.cocktails || [])],
+        };
+      } else {
+        const t = merged.brand_impressions[target];
+        t.count += data.count || 0;
+        t.cocktails = [...(t.cocktails || []), ...(data.cocktails || [])];
+        if (!t.supplier || t.supplier === 'UNKNOWN') {
+          t.supplier = data.supplier || t.supplier;
+        }
+      }
+    }
+
+    for (const issue of part?.compliance_issues || []) {
+      merged.compliance_issues.push(issue);
+    }
+
+    for (const entry of part?.off_apl_brands || part?.off_apl || []) {
+      const name = (typeof entry === 'string' ? entry : entry?.name || '').trim();
+      if (!name) continue;
+      const k = name.toLowerCase();
+      if (seenOff.has(k)) {
+        const prior = merged.off_apl_brands.find(
+          (e) => String(e.name || '').toLowerCase() === k
+        );
+        if (prior && Array.isArray(entry?.where)) {
+          prior.where = [...(prior.where || []), ...entry.where];
+        }
+        continue;
+      }
+      seenOff.add(k);
+      merged.off_apl_brands.push(
+        typeof entry === 'string' ? { name: entry, where: [] } : { ...entry }
+      );
+    }
+  }
+
+  return merged;
+}
+
+function defaultLabelFromFilename(filename) {
+  let t = String(filename || '').trim();
+
+  // Convention: everything before the first " - " is the group.
+  //   "Solitude - St Bernards - stbeez wine.pdf"  -> "Solitude"
+  //   "Palisades - Terrace Menu 25 26.pdf"        -> "Palisades"
+  // Folder structure is lost when files are uploaded, so a filename prefix is
+  // the only way to carry "which property is this" through the browser. Kept
+  // deliberately narrow — the prefix has to be short and there has to be
+  // something after it — so ordinary hyphenated names are untouched.
+  const dashParts = t.replace(/\.[A-Za-z0-9]{1,5}$/, '').split(' - ');
+  if (dashParts.length >= 2) {
+    const prefix = dashParts[0].trim();
+    const rest = dashParts.slice(1).join(' - ').trim();
+    if (prefix && rest && prefix.length <= 30 && !/\d{3}/.test(prefix)) {
+      return prefix.replace(/\s+/g, ' ');
+    }
+  }
+  t = t.replace(/\.[A-Za-z0-9]{1,5}$/, '');          // extension
+  // Repeat: browsers hand back "file (1) (1).pdf" after two downloads, and a
+  // single pass leaves one behind.
+  for (let i = 0; i < 4; i++) {
+    const before = t;
+    t = t.replace(/[\s_-]*\(\s*\d+\s*\)\s*$/, '');
+    t = t.replace(/[\s_-]*__\d+_\s*$/, '');
+    if (t === before) break;
+  }
+  t = t.replace(/[_]+/g, ' ');
+  t = t.replace(/-{2,}/g, ' ');
+  t = t.replace(/\bv\d+[a-z]?\b/gi, '');             // version tokens: v2, v3b
+  t = t.replace(/\b(final|edits?|draft|copy|rev\d*)\b/gi, '');
+  t = t.replace(/\bpdf\b/gi, '');
+  t = t.replace(/\s+/g, ' ').trim();
+  // Words removed above can strand punctuation: "EmbassyDenton-EDITS" -> "EmbassyDenton-".
+  t = t.replace(/^[\s\-–—_.,;:]+|[\s\-–—_.,;:]+$/g, '').trim();
+  // Split camelCase runs so "EmbassyDenton" reads as two words.
+  t = t.replace(/([a-z])([A-Z])/g, '$1 $2');
+  t = t.replace(/\s+/g, ' ').trim();
+  t = t.replace(/^[\s\-–—_.,;:]+|[\s\-–—_.,;:]+$/g, '').trim();
+  return t || String(filename || '').trim();
+}
+
+function filterIssues(issues, activeApl) {
+  const aplNames = new Set(
+    (activeApl?.brands || []).map((b) =>
+      String(b.name || '').trim().toLowerCase()
+    )
+  );
+  const isRealAplBrand = (name) =>
+    aplNames.size === 0 ||
+    aplNames.has(String(name || '').trim().toLowerCase());
+
+  return (issues || []).filter((i) => {
+    const found = String(i.found_text || '').trim();
+    const correct = String(i.correct_name || '').trim();
+    if (!found || !correct) return false;
+    if (found.toLowerCase() === correct.toLowerCase()) return false;
+    if (found.length > 45) return false;
+    return isRealAplBrand(correct);
+  });
+}
+
+// The cocktail field should hold a drink name. When it holds an explanation,
+// keep the first clause and cap it.
+function cleanIssueContext(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  const first = s.split(/\s[\u2014\u2013-]\s|;|\.\s/)[0].trim();
+  return first.length > 60 ? `${first.slice(0, 57)}...` : first;
+}
+
 // ===========================================================================
 // Results view
 // ===========================================================================
 
-function ResultsView({ results, onNew, onExport, onOpenEmail }) {
+function ResultsView({ results, activeApl, onNew, onExport, onOpenEmail }) {
+  const [newsStatus, setNewsStatus] = useState('idle'); // idle|loading|done|error
+  const [news, setNews] = useState(null);
+  const [newsError, setNewsError] = useState(null);
+
+  // Same filtering the emails get, so what's on screen matches what goes out.
+  const menusWithIssues = results.menuAnalyses
+    .map((menu) => ({ menu, issues: filterIssues(menu.compliance_issues, activeApl) }))
+    .filter((x) => x.issues.length > 0);
+
+  // Every APL brand that turned up in this batch. Checking only what's on
+  // these menus keeps the search count proportional to the run.
+  const brandsInBatch = [
+    ...new Set(results.aggregated.flatMap((s) => Object.keys(s.brands))),
+  ];
+
+  // Records a decision so this finding doesn't resurface next run. Optimistic:
+  // the card updates immediately and rolls back only if the write fails.
+  const reviewEvent = async (event, status) => {
+    setNews((prev) =>
+      prev
+        ? {
+            ...prev,
+            events: prev.events.map((e) =>
+              e.brand === event.brand && e.source_url === event.source_url
+                ? { ...e, status }
+                : e
+            ),
+          }
+        : prev
+    );
+    try {
+      const res = await fetch(`${API_BASE}/api/brand-news/review`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ event, status }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `Server error: ${res.status}`);
+      }
+    } catch (err) {
+      console.error('Review failed:', err);
+      setNewsError(`Couldn't save that decision: ${err.message}`);
+      setNews((prev) =>
+        prev
+          ? {
+              ...prev,
+              events: prev.events.map((e) =>
+                e.brand === event.brand && e.source_url === event.source_url
+                  ? { ...e, status: 'new' }
+                  : e
+              ),
+            }
+          : prev
+      );
+    }
+  };
+
+  const checkBrandNews = async () => {
+    setNewsStatus('loading');
+    setNewsError(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/brand-news`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ brands: brandsInBatch }),
+      });
+      // A 404 from Express returns an HTML error page, which blows up
+      // res.json() with an unhelpful "Unexpected token '<'".
+      const raw = await res.text();
+      let data;
+      try {
+        data = JSON.parse(raw);
+      } catch (_) {
+        throw new Error(
+          res.status === 404
+            ? 'Endpoint not found — is brand-news.js mounted in server.js?'
+            : `Server returned ${res.status} (not JSON)`
+        );
+      }
+      if (!res.ok) throw new Error(data.error || `Server error: ${res.status}`);
+      setNews(data);
+      setNewsStatus('done');
+    } catch (err) {
+      console.error('Brand news failed:', err);
+      setNewsError(err.message);
+      setNewsStatus('error');
+    }
+  };
+
   return (
     <div style={{ width: '98%', margin: '0 auto', padding: '0 20px' }}>
       <div
@@ -1046,6 +1771,42 @@ function ResultsView({ results, onNew, onExport, onOpenEmail }) {
             {results.aggregated.reduce((sum, s) => sum + s.total, 0)} total
             impressions
           </p>
+          {/* Which APL produced these numbers. Two separate batches have now
+              been run against the wrong brand list and looked entirely
+              plausible; the only tell was buried on the upload screen. */}
+          <div
+            style={{
+              marginTop: '12px',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '8px',
+              background: 'rgba(0,0,0,0.22)',
+              border: '1px solid rgba(255,255,255,0.35)',
+              borderRadius: '30px',
+              padding: '8px 18px',
+            }}
+          >
+            <FileText size={16} color="white" />
+            <span
+              style={{
+                color: 'white',
+                fontSize: '14px',
+                fontWeight: '800',
+                letterSpacing: '0.2px',
+              }}
+            >
+              {activeApl.name}
+            </span>
+            <span
+              style={{
+                color: 'rgba(255,255,255,0.85)',
+                fontSize: '13px',
+                fontWeight: '600',
+              }}
+            >
+              · {activeApl.brands.length} brands
+            </span>
+          </div>
         </div>
         <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
           <button
@@ -1088,6 +1849,29 @@ function ResultsView({ results, onNew, onExport, onOpenEmail }) {
             Generate Reports
           </button>
           <button
+            onClick={checkBrandNews}
+            disabled={newsStatus === 'loading'}
+            title="Checks the APL brands on these menus for ownership or distribution changes"
+            style={{
+              background: 'rgba(255,255,255,0.2)',
+              color: 'white',
+              border: '2px solid white',
+              padding: '16px 32px',
+              borderRadius: '10px',
+              fontSize: '16px',
+              fontWeight: '800',
+              cursor: newsStatus === 'loading' ? 'wait' : 'pointer',
+              textTransform: 'uppercase',
+              letterSpacing: '1px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+            }}
+          >
+            <AlertTriangle size={18} />
+            {newsStatus === 'loading' ? 'Checking\u2026' : 'Brand Check'}
+          </button>
+          <button
             onClick={onExport}
             style={{
               background: 'white',
@@ -1120,6 +1904,386 @@ function ResultsView({ results, onNew, onExport, onOpenEmail }) {
           boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
         }}
       >
+        {results.splitNotices && results.splitNotices.length > 0 && (
+          <div
+            style={{
+              background: '#f4f8ff',
+              border: '2px solid #b9d3ff',
+              borderRadius: '12px',
+              padding: '18px 24px',
+              marginBottom: '24px',
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '10px',
+                color: '#1c4f9c',
+                fontWeight: '800',
+                fontSize: '15px',
+                marginBottom: '6px',
+              }}
+            >
+              <FileText size={18} color="#1c4f9c" />
+              {results.splitNotices.length} menu
+              {results.splitNotices.length > 1 ? 's were' : ' was'} too large to
+              send in one piece and{' '}
+              {results.splitNotices.length > 1 ? 'were' : 'was'} analyzed in
+              parts.
+            </div>
+            <div style={{ fontSize: '13px', color: '#2a5ea8', lineHeight: '1.7' }}>
+              {results.splitNotices.map((n, i) => (
+                <div key={i}>
+                  • <strong>{n.filename}</strong> — split into {n.parts} parts
+                </div>
+              ))}
+            </div>
+            <div
+              style={{
+                fontSize: '12px',
+                color: '#2a5ea8',
+                marginTop: '8px',
+                fontStyle: 'italic',
+              }}
+            >
+              Counts from every part are combined, so the totals below are for
+              the whole menu.
+            </div>
+          </div>
+        )}
+
+        {results.failedMenus && results.failedMenus.length > 0 && (
+          <div
+            style={{
+              background: '#fff8e6',
+              border: '2px solid #ffab00',
+              borderRadius: '12px',
+              padding: '20px 24px',
+              marginBottom: '32px',
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '10px',
+                marginBottom: '10px',
+                color: '#b26a00',
+                fontWeight: '800',
+                fontSize: '16px',
+              }}
+            >
+              <AlertTriangle size={20} color="#b26a00" />
+              {results.failedMenus.length} menu
+              {results.failedMenus.length > 1 ? 's' : ''} couldn't be analyzed —
+              results below cover the {results.menuAnalyses.length} that
+              succeeded.
+            </div>
+            <div style={{ fontSize: '13px', color: '#7a5200', lineHeight: '1.7' }}>
+              {results.failedMenus.map((f, i) => (
+                <div key={i}>
+                  • <strong>{f.filename}</strong> — {f.error}
+                </div>
+              ))}
+            </div>
+            <div
+              style={{
+                fontSize: '12px',
+                color: '#7a5200',
+                marginTop: '10px',
+                fontStyle: 'italic',
+              }}
+            >
+              Tip: re-run just the failed file(s) on their own to see the raw
+              response, or forward this list to check those menus by hand.
+            </div>
+          </div>
+        )}
+
+        {newsStatus === 'loading' && (
+          <div
+            style={{
+              background: '#fafafa',
+              border: '2px solid #e8e8e8',
+              borderRadius: '12px',
+              padding: '20px 24px',
+              marginBottom: '32px',
+              color: '#666',
+              fontWeight: '700',
+              fontSize: '15px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '12px',
+            }}
+          >
+            <Flame
+              size={20}
+              color="#da291c"
+              style={{ animation: 'flicker 1s ease-in-out infinite' }}
+            />
+            Checking {brandsInBatch.length} brands for ownership and
+            distribution changes. This runs a web search per brand, so it takes
+            a minute.
+          </div>
+        )}
+
+        {newsStatus === 'error' && (
+          <div
+            style={{
+              background: '#fff5f5',
+              border: '2px solid #da291c',
+              borderRadius: '12px',
+              padding: '20px 24px',
+              marginBottom: '32px',
+              color: '#da291c',
+              fontWeight: '700',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '12px',
+            }}
+          >
+            <AlertTriangle size={20} />
+            Brand check failed: {newsError}
+          </div>
+        )}
+
+        {newsStatus === 'done' && news && (
+          <div style={{ marginBottom: '40px' }}>
+            <h2
+              style={{
+                fontSize: '32px',
+                fontWeight: '900',
+                marginBottom: '8px',
+                color: '#1a1a1a',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '12px',
+              }}
+            >
+              <AlertTriangle size={32} color="#b26a00" />
+              Brand Check ({news.events.length})
+            </h2>
+            <p
+              style={{
+                fontSize: '15px',
+                color: '#666',
+                margin: '0 0 24px 0',
+                lineHeight: '1.6',
+              }}
+            >
+              {news.checked} brands checked
+              {news.cached > 0 && `, ${news.cached} from cache`}
+              {news.suppressed > 0 &&
+                `, ${news.suppressed} already reviewed and hidden`}
+              . Nothing here changes the APL — verify each against its
+              source, then update the supplier mapping by hand if it holds up.
+              {news.registryError &&
+                ' (Review history unavailable — decisions may not stick.)'}
+            </p>
+
+            {news.events.length === 0 ? (
+              <div
+                style={{
+                  background: '#f0f9f4',
+                  border: '2px solid #28a745',
+                  borderRadius: '12px',
+                  padding: '20px 24px',
+                  color: '#28a745',
+                  fontWeight: '700',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '12px',
+                }}
+              >
+                <CheckCircle size={20} />
+                No ownership or distribution changes found for these brands.
+              </div>
+            ) : (
+              <div style={{ display: 'grid', gap: '16px' }}>
+                {news.events.map((e, i) => (
+                  <div
+                    key={i}
+                    style={{
+                      background: '#fffdf7',
+                      border: '2px solid #ffe1a6',
+                      borderRadius: '12px',
+                      padding: '20px 24px',
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '10px',
+                        flexWrap: 'wrap',
+                        marginBottom: '8px',
+                      }}
+                    >
+                      <strong style={{ fontSize: '18px', color: '#1a1a1a' }}>
+                        {e.brand}
+                      </strong>
+                      <span
+                        style={{
+                          fontSize: '11px',
+                          fontWeight: '800',
+                          textTransform: 'uppercase',
+                          letterSpacing: '1px',
+                          color: '#b26a00',
+                          background: '#fff3d6',
+                          borderRadius: '20px',
+                          padding: '4px 12px',
+                        }}
+                      >
+                        {e.type}
+                      </span>
+                      <span
+                        style={{
+                          fontSize: '11px',
+                          fontWeight: '800',
+                          textTransform: 'uppercase',
+                          letterSpacing: '1px',
+                          color:
+                            e.confidence === 'high'
+                              ? '#28a745'
+                              : e.confidence === 'medium'
+                              ? '#b26a00'
+                              : '#999',
+                          border: '1px solid currentColor',
+                          borderRadius: '20px',
+                          padding: '3px 10px',
+                        }}
+                      >
+                        {e.confidence} confidence
+                      </span>
+                      {e.date && (
+                        <span style={{ fontSize: '13px', color: '#999', fontWeight: '600' }}>
+                          {e.date}
+                        </span>
+                      )}
+                    </div>
+
+                    <div
+                      style={{
+                        fontSize: '15px',
+                        color: '#1a1a1a',
+                        lineHeight: '1.6',
+                        marginBottom: e.from || e.to ? '8px' : '10px',
+                      }}
+                    >
+                      {e.summary}
+                    </div>
+
+                    {(e.from || e.to) && (
+                      <div
+                        style={{
+                          fontSize: '14px',
+                          color: '#666',
+                          fontWeight: '700',
+                          marginBottom: '10px',
+                        }}
+                      >
+                        {e.from || 'Unknown'} → {e.to || 'Unknown'}
+                      </div>
+                    )}
+
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '12px',
+                        flexWrap: 'wrap',
+                      }}
+                    >
+                      <a
+                        href={e.source_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{
+                          fontSize: '13px',
+                          color: '#da291c',
+                          fontWeight: '700',
+                          textDecoration: 'underline',
+                        }}
+                      >
+                        Verify at source
+                      </a>
+                      <span style={{ flex: 1 }} />
+                      {e.status === 'confirmed' || e.status === 'dismissed' ? (
+                        <span
+                          style={{
+                            fontSize: '12px',
+                            fontWeight: '800',
+                            textTransform: 'uppercase',
+                            letterSpacing: '1px',
+                            color: e.status === 'confirmed' ? '#28a745' : '#999',
+                          }}
+                        >
+                          {e.status} — won't reappear
+                        </span>
+                      ) : (
+                        <>
+                          <button
+                            onClick={() => reviewEvent(e, 'confirmed')}
+                            title="Real change. Update the APL supplier mapping by hand."
+                            style={{
+                              background: '#28a745',
+                              color: 'white',
+                              border: 'none',
+                              padding: '8px 18px',
+                              borderRadius: '8px',
+                              fontSize: '12px',
+                              fontWeight: '800',
+                              cursor: 'pointer',
+                              textTransform: 'uppercase',
+                              letterSpacing: '1px',
+                            }}
+                          >
+                            Confirm
+                          </button>
+                          <button
+                            onClick={() => reviewEvent(e, 'dismissed')}
+                            title="Not relevant. Won't be shown again."
+                            style={{
+                              background: 'transparent',
+                              color: '#666',
+                              border: '2px solid #ddd',
+                              padding: '6px 18px',
+                              borderRadius: '8px',
+                              fontSize: '12px',
+                              fontWeight: '800',
+                              cursor: 'pointer',
+                              textTransform: 'uppercase',
+                              letterSpacing: '1px',
+                            }}
+                          >
+                            Dismiss
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {news.errors && news.errors.length > 0 && (
+              <div
+                style={{
+                  marginTop: '16px',
+                  fontSize: '13px',
+                  color: '#999',
+                  fontWeight: '600',
+                }}
+              >
+                {news.errors.length} brand
+                {news.errors.length > 1 ? 's' : ''} couldn't be checked:{' '}
+                {news.errors.map((x) => x.brand).join(', ')}
+              </div>
+            )}
+          </div>
+        )}
+
         <h2
           style={{
             fontSize: '32px',
@@ -1252,7 +2416,7 @@ function ResultsView({ results, onNew, onExport, onOpenEmail }) {
           ))}
         </div>
 
-        {results.menuAnalyses.some((m) => m.compliance_issues?.length > 0) && (
+        {menusWithIssues.length > 0 && (
           <div style={{ marginTop: '50px' }}>
             <h2
               style={{
@@ -1268,9 +2432,8 @@ function ResultsView({ results, onNew, onExport, onOpenEmail }) {
               <AlertTriangle size={32} />
               Compliance Issues
             </h2>
-            {results.menuAnalyses.map(
-              (menu, idx) =>
-                menu.compliance_issues?.length > 0 && (
+            {menusWithIssues.map(
+              ({ menu, issues }, idx) => (
                   <div key={idx} style={{ marginBottom: '30px' }}>
                     <h3
                       style={{
@@ -1282,7 +2445,7 @@ function ResultsView({ results, onNew, onExport, onOpenEmail }) {
                     >
                       📍 {menu.location}
                     </h3>
-                    {menu.compliance_issues.map((issue, i) => (
+                    {issues.map((issue, i) => (
                       <div
                         key={i}
                         style={{
@@ -1317,8 +2480,13 @@ function ResultsView({ results, onNew, onExport, onOpenEmail }) {
                           }}
                         >
                           <div>
-                            Found: "<strong>{issue.found_text}</strong>" in{' '}
-                            <em>{issue.cocktail}</em>
+                            Found: "<strong>{issue.found_text}</strong>"
+                            {cleanIssueContext(issue.cocktail) && (
+                              <>
+                                {' '}
+                                in <em>{cleanIssueContext(issue.cocktail)}</em>
+                              </>
+                            )}
                           </div>
                           <div style={{ marginTop: '6px' }}>
                             Should be: "
@@ -1335,6 +2503,104 @@ function ResultsView({ results, onNew, onExport, onOpenEmail }) {
             )}
           </div>
         )}
+        {results.offApl && results.offApl.length > 0 && (
+          <div style={{ marginTop: '50px' }}>
+            <h2
+              style={{
+                fontSize: '32px',
+                fontWeight: '900',
+                marginBottom: '8px',
+                color: '#1a1a1a',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '12px',
+              }}
+            >
+              <FileText size={32} color="#b26a00" />
+              Not in APL ({results.offApl.length})
+            </h2>
+            <p
+              style={{
+                fontSize: '15px',
+                color: '#666',
+                margin: '0 0 24px 0',
+                lineHeight: '1.6',
+              }}
+            >
+              Branded products found on the menus that aren't in the active APL.
+              These are <strong>not counted as impressions</strong> and are{' '}
+              <strong>not emailed to suppliers</strong> — listed here so you can
+              spot-check coverage and see what else each venue carries.
+            </p>
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
+                gap: '16px',
+              }}
+            >
+              {results.offApl.map((b, i) => (
+                <div
+                  key={i}
+                  style={{
+                    background: '#fffdf7',
+                    border: '2px solid #ffe1a6',
+                    borderRadius: '12px',
+                    padding: '18px 20px',
+                  }}
+                >
+                  <div
+                    style={{
+                      fontSize: '16px',
+                      fontWeight: '800',
+                      color: '#1a1a1a',
+                      marginBottom: b.category ? '2px' : '8px',
+                    }}
+                  >
+                    {b.name}
+                  </div>
+                  {b.category && (
+                    <div
+                      style={{
+                        fontSize: '12px',
+                        color: '#b26a00',
+                        fontWeight: '700',
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.5px',
+                        marginBottom: '8px',
+                      }}
+                    >
+                      {b.category}
+                    </div>
+                  )}
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexWrap: 'wrap',
+                      gap: '6px',
+                    }}
+                  >
+                    {Object.entries(b.locations).map(([loc, count]) => (
+                      <span
+                        key={loc}
+                        style={{
+                          fontSize: '12px',
+                          fontWeight: '700',
+                          color: '#7a5200',
+                          background: '#fff3d6',
+                          borderRadius: '20px',
+                          padding: '4px 12px',
+                        }}
+                      >
+                        {loc}: {count}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1344,15 +2610,48 @@ function ResultsView({ results, onNew, onExport, onOpenEmail }) {
 // Email report view
 // ===========================================================================
 
-function EmailReportView({ results, onBack }) {
-  const [emails, setEmails] = useState(() => buildEmails(results));
+function EmailReportView({ results, activeApl, onBack }) {
+  const [emails, setEmails] = useState(() =>
+    buildVenueEmails(results, activeApl)
+  );
   const [currentIdx, setCurrentIdx] = useState(0);
   const [editing, setEditing] = useState(false);
   const [step, setStep] = useState('review'); // 'review' | 'sending' | 'done'
   const [sendError, setSendError] = useState(null);
   const [sendSummary, setSendSummary] = useState(null);
+  const [contacts, setContacts] = useState([]);
+  const [contactsStatus, setContactsStatus] = useState('loading'); // loading | ready | unavailable
+  const [draftAddr, setDraftAddr] = useState('');
+  const [addrError, setAddrError] = useState(null);
 
   const current = emails[currentIdx];
+
+  // Load the saved address book, then prefill each venue with whoever received
+  // that venue's last report. This is the "click once to include" bit - by the
+  // time the review screen renders, the usual recipients are already there.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const list = await fetchContacts();
+      if (cancelled) return;
+      if (!list) {
+        setContactsStatus('unavailable');
+        return;
+      }
+      setContacts(list);
+      setContactsStatus('ready');
+      setEmails((prev) =>
+        prev.map((e) =>
+          e.to.length
+            ? e
+            : { ...e, to: matchContacts(list, e.location).map((c) => c.email) }
+        )
+      );
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const updateField = (field, value) => {
     setEmails((prev) => {
@@ -1362,9 +2661,68 @@ function EmailReportView({ results, onBack }) {
     });
   };
 
-  // Shared send pipeline. `batch` is the array of emails to send.
+  // ----- Recipients -----
+
+  const addRecipient = (raw) => {
+    const clean = String(raw || '').trim().toLowerCase();
+    if (!clean) return;
+    if (!isEmail(clean)) {
+      setAddrError(`"${clean}" doesn't look like an email address.`);
+      return;
+    }
+    setAddrError(null);
+    setEmails((prev) => {
+      const next = [...prev];
+      const cur = next[currentIdx];
+      if (cur.to.includes(clean)) return prev;
+      next[currentIdx] = { ...cur, to: [...cur.to, clean] };
+      return next;
+    });
+    setDraftAddr('');
+  };
+
+  const removeRecipient = (addr) => {
+    setEmails((prev) => {
+      const next = [...prev];
+      const cur = next[currentIdx];
+      next[currentIdx] = { ...cur, to: cur.to.filter((a) => a !== addr) };
+      return next;
+    });
+  };
+
+  // Saved contacts not already on this email, venue matches first.
+  const suggestions = (() => {
+    if (!current) return [];
+    const taken = new Set(current.to);
+    const forVenue = matchContacts(contacts, current.location).filter(
+      (c) => !taken.has(c.email)
+    );
+    const venueEmails = new Set(forVenue.map((c) => c.email));
+    const others = contacts.filter(
+      (c) => !taken.has(c.email) && !venueEmails.has(c.email)
+    );
+    return [...forVenue, ...others].slice(0, 12);
+  })();
+
+  const missingRecipients = emails.filter((e) => e.to.length === 0);
+
+  // ----- Send -----
+
   const doSend = async (batch) => {
     setSendError(null);
+
+    // Guard. A venue with no recipient would either error out at SendGrid or,
+    // worse, silently succeed with nobody on it.
+    const blank = batch.filter((e) => e.to.length === 0);
+    if (blank.length) {
+      setSendError(
+        `${blank.length} venue${
+          blank.length > 1 ? 's have' : ' has'
+        } no recipients: ${blank.map((e) => e.location).join(', ')}`
+      );
+      return;
+    }
+
     setStep('sending');
 
     try {
@@ -1373,10 +2731,14 @@ function EmailReportView({ results, onBack }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           emails: batch.map((e) => ({
-            to: e.to,
+            to: e.to, // now an ARRAY of addresses, not a single string
             subject: e.subject,
             body: e.body,
-            supplier: e.supplier,
+            location: e.location,
+            // Back-compat: the existing Railway handler labels results by
+            // `supplier`. Sending both means the frontend works against the
+            // current backend unchanged.
+            supplier: e.location,
           })),
         }),
       });
@@ -1393,6 +2755,14 @@ function EmailReportView({ results, onBack }) {
         );
       }
       setStep('done');
+
+      // Remember these recipients for next time. Deliberately after the send
+      // and deliberately not awaited into the error path.
+      saveContacts(
+        batch.flatMap((e) =>
+          e.to.map((email) => ({ email, location: e.location }))
+        )
+      );
     } catch (err) {
       console.error('Send failed:', err);
       setSendError(err.message);
@@ -1400,10 +2770,7 @@ function EmailReportView({ results, onBack }) {
     }
   };
 
-  // Send every supplier report.
   const sendAll = () => doSend(emails);
-
-  // Send ONLY the supplier currently being viewed — used for safe testing.
   const sendOne = () => doSend([emails[currentIdx]]);
 
   // ----- Sending screen -----
@@ -1439,17 +2806,14 @@ function EmailReportView({ results, onBack }) {
         >
           Sending Reports
         </h2>
-        <p style={{ color: '#666', fontSize: '18px' }}>
-          Sending {emails.length} supplier{' '}
-          {emails.length === 1 ? 'report' : 'reports'}…
-        </p>
+        <p style={{ color: '#666', fontSize: '18px' }}>Sending to venues…</p>
       </div>
     );
   }
 
   // ----- Done screen -----
   if (step === 'done') {
-    const sent = sendSummary?.sent ?? emails.length;
+    const sent = sendSummary?.sent ?? 0;
     const failed = sendSummary?.failed ?? 0;
     const allOk = failed === 0;
     return (
@@ -1480,13 +2844,7 @@ function EmailReportView({ results, onBack }) {
           >
             {allOk ? 'Reports Sent' : 'Sent with errors'}
           </h2>
-          <p
-            style={{
-              color: '#666',
-              fontSize: '18px',
-              marginBottom: '32px',
-            }}
-          >
+          <p style={{ color: '#666', fontSize: '18px', marginBottom: '32px' }}>
             {sent} sent · {failed} failed
           </p>
 
@@ -1513,11 +2871,22 @@ function EmailReportView({ results, onBack }) {
                     fontWeight: '700',
                   }}
                 >
-                  {r.status === 'sent' ? '✓' : '✗'} {r.supplier} ({r.to})
+                  {r.status === 'sent' ? '✓' : '✗'}{' '}
+                  {r.location || r.supplier}
+                  <div
+                    style={{
+                      color: '#666',
+                      fontWeight: '500',
+                      fontSize: '13px',
+                      marginTop: '4px',
+                    }}
+                  >
+                    {Array.isArray(r.to) ? r.to.join(', ') : r.to}
+                  </div>
                   {r.error && (
                     <div
                       style={{
-                        color: '#666',
+                        color: '#da291c',
                         fontWeight: '500',
                         fontSize: '13px',
                         marginTop: '4px',
@@ -1583,7 +2952,7 @@ function EmailReportView({ results, onBack }) {
                 lineHeight: '1.2',
               }}
             >
-              Review & Send Reports
+              Review &amp; Send Reports
             </h1>
           </div>
           <p
@@ -1594,7 +2963,8 @@ function EmailReportView({ results, onBack }) {
               fontWeight: '600',
             }}
           >
-            {emails.length} supplier reports · review each before sending
+            {emails.length} venue report{emails.length === 1 ? '' : 's'} ·
+            review each before sending
           </p>
         </div>
         <div style={{ display: 'flex', gap: '12px' }}>
@@ -1616,7 +2986,7 @@ function EmailReportView({ results, onBack }) {
           </button>
           <button
             onClick={sendOne}
-            title="Sends only the supplier you're currently viewing — useful for testing to your own inbox"
+            title="Sends only the venue you're currently viewing - useful for testing to your own inbox"
             style={{
               background: 'white',
               color: '#1a1a1a',
@@ -1638,15 +3008,21 @@ function EmailReportView({ results, onBack }) {
           </button>
           <button
             onClick={sendAll}
+            disabled={missingRecipients.length > 0}
+            title={
+              missingRecipients.length > 0
+                ? `${missingRecipients.length} venue(s) still need recipients`
+                : ''
+            }
             style={{
-              background: '#28a745',
+              background: missingRecipients.length > 0 ? '#9bbfa5' : '#28a745',
               color: 'white',
               border: 'none',
               padding: '14px 32px',
               borderRadius: '10px',
               fontSize: '16px',
               fontWeight: '800',
-              cursor: 'pointer',
+              cursor: missingRecipients.length > 0 ? 'not-allowed' : 'pointer',
               textTransform: 'uppercase',
               letterSpacing: '1px',
               display: 'flex',
@@ -1656,7 +3032,7 @@ function EmailReportView({ results, onBack }) {
             }}
           >
             <Send size={18} />
-            Approve & Send All
+            Approve &amp; Send All
           </button>
         </div>
       </div>
@@ -1681,6 +3057,29 @@ function EmailReportView({ results, onBack }) {
         </div>
       )}
 
+      {contactsStatus === 'unavailable' && (
+        <div
+          style={{
+            background: '#fff8e6',
+            border: '2px solid #ffab00',
+            borderRadius: '12px',
+            padding: '16px 24px',
+            marginBottom: '24px',
+            color: '#b26a00',
+            fontWeight: '700',
+            fontSize: '14px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '12px',
+          }}
+        >
+          <AlertTriangle size={18} />
+          Saved contacts aren't available - the address book endpoint isn't
+          responding. You can still type recipients by hand; they just won't be
+          remembered for next time.
+        </div>
+      )}
+
       <div
         style={{
           display: 'grid',
@@ -1688,7 +3087,7 @@ function EmailReportView({ results, onBack }) {
           gap: '24px',
         }}
       >
-        {/* Supplier list */}
+        {/* Venue list */}
         <div
           style={{
             background: 'white',
@@ -1708,44 +3107,58 @@ function EmailReportView({ results, onBack }) {
               margin: '0 0 16px 0',
             }}
           >
-            Suppliers ({emails.length})
+            Venues ({emails.length})
           </h3>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-            {emails.map((e, idx) => (
-              <button
-                key={e.supplier}
-                onClick={() => {
-                  setCurrentIdx(idx);
-                  setEditing(false);
-                }}
-                style={{
-                  background:
-                    currentIdx === idx
+            {emails.map((e, idx) => {
+              const active = currentIdx === idx;
+              const noRecipients = e.to.length === 0;
+              return (
+                <button
+                  key={e.location + idx}
+                  onClick={() => {
+                    setCurrentIdx(idx);
+                    setEditing(false);
+                    setDraftAddr('');
+                    setAddrError(null);
+                  }}
+                  style={{
+                    background: active
                       ? 'linear-gradient(135deg, #da291c 0%, #ff6b35 100%)'
                       : '#fafafa',
-                  color: currentIdx === idx ? 'white' : '#1a1a1a',
-                  border: 'none',
-                  padding: '14px 16px',
-                  borderRadius: '10px',
-                  fontSize: '14px',
-                  fontWeight: '800',
-                  cursor: 'pointer',
-                  textAlign: 'left',
-                }}
-              >
-                <div>{e.supplier}</div>
-                <div
-                  style={{
-                    fontSize: '12px',
-                    opacity: 0.8,
-                    fontWeight: '600',
-                    marginTop: '4px',
+                    color: active ? 'white' : '#1a1a1a',
+                    border: noRecipients
+                      ? '2px solid #ffab00'
+                      : '2px solid transparent',
+                    padding: '14px 16px',
+                    borderRadius: '10px',
+                    fontSize: '14px',
+                    fontWeight: '800',
+                    cursor: 'pointer',
+                    textAlign: 'left',
                   }}
                 >
-                  {e.totalImpressions} impressions
-                </div>
-              </button>
-            ))}
+                  <div>{e.location}</div>
+                  <div
+                    style={{
+                      fontSize: '12px',
+                      opacity: 0.85,
+                      fontWeight: '600',
+                      marginTop: '4px',
+                    }}
+                  >
+                    {e.totalImpressions} impressions ·{' '}
+                    {noRecipients ? (
+                      <span style={{ color: active ? '#fff3d6' : '#b26a00' }}>
+                        no recipients
+                      </span>
+                    ) : (
+                      `${e.to.length} recipient${e.to.length > 1 ? 's' : ''}`
+                    )}
+                  </div>
+                </button>
+              );
+            })}
           </div>
         </div>
 
@@ -1782,13 +3195,22 @@ function EmailReportView({ results, onBack }) {
                 Preview {currentIdx + 1} of {emails.length}
               </div>
               <div
+                style={{ fontSize: '24px', fontWeight: '900', color: '#1a1a1a' }}
+              >
+                {current.location}
+              </div>
+              <div
                 style={{
-                  fontSize: '24px',
-                  fontWeight: '900',
-                  color: '#1a1a1a',
+                  fontSize: '13px',
+                  color: '#666',
+                  fontWeight: '600',
+                  marginTop: '4px',
                 }}
               >
-                {current.supplier}
+                {current.totalImpressions} impressions · {current.brandCount}{' '}
+                brands · {current.issueCount} naming note
+                {current.issueCount === 1 ? '' : 's'} · {current.offAplCount}{' '}
+                off-APL
               </div>
             </div>
             <button
@@ -1813,7 +3235,191 @@ function EmailReportView({ results, onBack }) {
             </button>
           </div>
 
-          {/* To / Subject */}
+          {/* Recipients */}
+          <div
+            style={{
+              background: '#fafafa',
+              padding: '20px',
+              borderRadius: '10px',
+              marginBottom: '20px',
+              border: `2px solid ${
+                current.to.length === 0 ? '#ffab00' : '#f0f0f0'
+              }`,
+            }}
+          >
+            <div
+              style={{
+                fontSize: '12px',
+                color: '#666',
+                fontWeight: '800',
+                textTransform: 'uppercase',
+                marginBottom: '10px',
+              }}
+            >
+              To ({current.to.length})
+            </div>
+
+            {current.to.length > 0 ? (
+              <div
+                style={{
+                  display: 'flex',
+                  flexWrap: 'wrap',
+                  gap: '8px',
+                  marginBottom: '12px',
+                }}
+              >
+                {current.to.map((addr) => (
+                  <span
+                    key={addr}
+                    style={{
+                      background: 'white',
+                      border: '2px solid #da291c',
+                      borderRadius: '30px',
+                      padding: '8px 8px 8px 16px',
+                      fontSize: '14px',
+                      fontWeight: '700',
+                      color: '#1a1a1a',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '8px',
+                    }}
+                  >
+                    {addr}
+                    <button
+                      onClick={() => removeRecipient(addr)}
+                      aria-label={`Remove ${addr}`}
+                      style={{
+                        background: '#f0f0f0',
+                        border: 'none',
+                        borderRadius: '50%',
+                        width: '22px',
+                        height: '22px',
+                        cursor: 'pointer',
+                        color: '#666',
+                        fontSize: '14px',
+                        lineHeight: '1',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                      }}
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <div
+                style={{
+                  fontSize: '14px',
+                  color: '#b26a00',
+                  fontWeight: '700',
+                  marginBottom: '12px',
+                }}
+              >
+                No recipients yet - add at least one below.
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+              <input
+                type="email"
+                value={draftAddr}
+                placeholder="name@venue.com"
+                onChange={(e) => {
+                  setDraftAddr(e.target.value);
+                  if (addrError) setAddrError(null);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    addRecipient(draftAddr);
+                  }
+                }}
+                style={{
+                  flex: 1,
+                  minWidth: '220px',
+                  padding: '10px 12px',
+                  fontSize: '15px',
+                  border: '2px solid #ddd',
+                  borderRadius: '8px',
+                  fontWeight: '600',
+                }}
+              />
+              <button
+                onClick={() => addRecipient(draftAddr)}
+                style={{
+                  background: '#1a1a1a',
+                  color: 'white',
+                  border: 'none',
+                  padding: '10px 22px',
+                  borderRadius: '8px',
+                  fontSize: '14px',
+                  fontWeight: '800',
+                  cursor: 'pointer',
+                  textTransform: 'uppercase',
+                  letterSpacing: '1px',
+                }}
+              >
+                Add
+              </button>
+            </div>
+
+            {addrError && (
+              <div
+                style={{
+                  marginTop: '8px',
+                  fontSize: '13px',
+                  color: '#da291c',
+                  fontWeight: '700',
+                }}
+              >
+                {addrError}
+              </div>
+            )}
+
+            {suggestions.length > 0 && (
+              <div style={{ marginTop: '14px' }}>
+                <div
+                  style={{
+                    fontSize: '11px',
+                    color: '#999',
+                    fontWeight: '800',
+                    textTransform: 'uppercase',
+                    letterSpacing: '1px',
+                    marginBottom: '8px',
+                  }}
+                >
+                  Saved contacts - click to add
+                </div>
+                <div
+                  style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}
+                >
+                  {suggestions.map((c) => (
+                    <button
+                      key={c.email}
+                      onClick={() => addRecipient(c.email)}
+                      title={c.name ? `${c.name} - ${c.email}` : c.email}
+                      style={{
+                        background: 'white',
+                        border: '2px solid #e8e8e8',
+                        borderRadius: '30px',
+                        padding: '8px 16px',
+                        fontSize: '13px',
+                        fontWeight: '700',
+                        color: '#666',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      + {c.name || c.email}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Subject */}
           <div
             style={{
               background: '#fafafa',
@@ -1823,70 +3429,36 @@ function EmailReportView({ results, onBack }) {
               border: '2px solid #f0f0f0',
             }}
           >
-            <div style={{ marginBottom: '14px' }}>
-              <div
-                style={{
-                  fontSize: '12px',
-                  color: '#666',
-                  fontWeight: '800',
-                  textTransform: 'uppercase',
-                  marginBottom: '6px',
-                }}
-              >
-                To
-              </div>
-              {editing ? (
-                <input
-                  type="email"
-                  value={current.to}
-                  onChange={(e) => updateField('to', e.target.value)}
-                  style={{
-                    width: '100%',
-                    padding: '10px 12px',
-                    fontSize: '15px',
-                    border: '2px solid #da291c',
-                    borderRadius: '8px',
-                    fontWeight: '600',
-                  }}
-                />
-              ) : (
-                <div style={{ fontSize: '15px', fontWeight: '700' }}>
-                  {current.to}
-                </div>
-              )}
+            <div
+              style={{
+                fontSize: '12px',
+                color: '#666',
+                fontWeight: '800',
+                textTransform: 'uppercase',
+                marginBottom: '6px',
+              }}
+            >
+              Subject
             </div>
-            <div>
-              <div
+            {editing ? (
+              <input
+                type="text"
+                value={current.subject}
+                onChange={(e) => updateField('subject', e.target.value)}
                 style={{
-                  fontSize: '12px',
-                  color: '#666',
-                  fontWeight: '800',
-                  textTransform: 'uppercase',
-                  marginBottom: '6px',
+                  width: '100%',
+                  padding: '10px 12px',
+                  fontSize: '15px',
+                  border: '2px solid #da291c',
+                  borderRadius: '8px',
+                  fontWeight: '600',
                 }}
-              >
-                Subject
+              />
+            ) : (
+              <div style={{ fontSize: '15px', fontWeight: '700' }}>
+                {current.subject}
               </div>
-              {editing ? (
-                <input
-                  type="text"
-                  value={current.subject}
-                  onChange={(e) => updateField('subject', e.target.value)}
-                  style={{
-                    width: '100%',
-                    padding: '10px 12px',
-                    fontSize: '15px',
-                    border: '2px solid #da291c',
-                    borderRadius: '8px',
-                    fontWeight: '600',
-                  }}
-                />
-              ) : (
-                <div style={{ fontSize: '15px', fontWeight: '700' }}>
-                  {current.subject}
-                </div>
-              )}
-            </div>
+            )}
           </div>
 
           {/* Body */}
@@ -1944,6 +3516,8 @@ function EmailReportView({ results, onBack }) {
               onClick={() => {
                 setCurrentIdx(Math.max(0, currentIdx - 1));
                 setEditing(false);
+                setDraftAddr('');
+                setAddrError(null);
               }}
               disabled={currentIdx === 0}
               style={{
@@ -1968,6 +3542,8 @@ function EmailReportView({ results, onBack }) {
               onClick={() => {
                 setCurrentIdx(Math.min(emails.length - 1, currentIdx + 1));
                 setEditing(false);
+                setDraftAddr('');
+                setAddrError(null);
               }}
               disabled={currentIdx === emails.length - 1}
               style={{
@@ -1995,6 +3571,222 @@ function EmailReportView({ results, onBack }) {
       </div>
     </div>
   );
+}
+
+// ---------------------------------------------------------------------------
+// Robust model-JSON parsing. Models sometimes wrap JSON in ```json fences,
+// add a sentence before or after it, or emit more than one block. A naive
+// JSON.parse() throws on ALL of those — most visibly with "unexpected
+// non-whitespace character after JSON data" when there's trailing text. We
+// strip fences, try a clean parse, and if that fails, extract the first
+// balanced { ... } object and parse only that.
+// ---------------------------------------------------------------------------
+
+function parseClaudeJson(rawText) {
+  const stripped = String(rawText || '')
+    .replace(/```json/gi, '')
+    .replace(/```/g, '')
+    .trim();
+
+  // Fast path: already-clean JSON.
+  try {
+    return JSON.parse(stripped);
+  } catch (_) {
+    // fall through to balanced-object extraction
+  }
+
+  const candidate = extractFirstJsonObject(stripped);
+  if (candidate) {
+    // If this still throws, the caller's per-menu try/catch records it as a
+    // failed menu rather than killing the whole batch.
+    return JSON.parse(candidate);
+  }
+
+  const snippet = stripped.slice(0, 200).replace(/\s+/g, ' ');
+  throw new Error(
+    `No parseable JSON object found in model response. Started with: "${snippet}"`
+  );
+}
+
+// Return the substring from the first '{' through its matching '}', tracking
+// string literals and escapes so braces inside strings don't miscount. This is
+// what lets us ignore any prose/second-object that follows the JSON.
+function extractFirstJsonObject(s) {
+  const start = s.indexOf('{');
+  if (start === -1) return null;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = start; i < s.length; i++) {
+    const ch = s[i];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === '\\') {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === '{') {
+      depth++;
+    } else if (ch === '}') {
+      depth--;
+      if (depth === 0) {
+        return s.slice(start, i + 1);
+      }
+    }
+  }
+  return null; // never balanced — response was likely truncated
+}
+
+// ---------------------------------------------------------------------------
+// Aggregate the "off-APL" brands the model flagged across menus. These are
+// brands present on menus that are NOT in the active APL. They are NEVER
+// counted as impressions and NEVER emailed to suppliers — this list exists
+// purely as a manual-review aid ("what else is this venue carrying?").
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Deciding whether an "off-APL" brand is really off-APL.
+//
+// The model is asked to keep these lists disjoint, and mostly it does — but
+// it's a fuzzy judgement made per menu, so the same batch can bill "Samuel
+// Adams Boston Lager" and simultaneously list "Sam Adams Boston Lager" as a
+// competitor product. Across 39 menus that inflates the review list and makes
+// coverage look worse than it is. Prompt wording can't fix an intermittent
+// judgement; a deterministic check after the fact can.
+// ---------------------------------------------------------------------------
+
+// Words that describe a product rather than name it. Menus append them freely
+// ("Ford's Gin", "Canyon Road Wines"); APLs usually don't.
+const DESCRIPTOR_WORDS = new Set([
+  'vodka', 'gin', 'rum', 'tequila', 'mezcal', 'whiskey', 'whisky', 'bourbon',
+  'scotch', 'brandy', 'cognac', 'liqueur', 'cordial', 'vermouth', 'beer',
+  'lager', 'ale', 'ipa', 'pilsner', 'stout', 'porter', 'cider', 'seltzer',
+  'wine', 'wines', 'champagne', 'prosecco', 'sparkling',
+  'na', 'nonalcoholic', 'non', 'alcoholic', 'hard', 'the', 'brand', 'brands',
+]);
+// Deliberately NOT descriptors: blanco, silver, reposado, añejo, 12, 1942.
+// Those distinguish one SKU from another — "Don Julio Blanco" and "Don Julio
+// Reposado" are different products and only one may be approved.
+
+function offAplTokens(raw) {
+  return String(raw || '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\([^)]*\)/g, ' ')
+    .toLowerCase()
+    .replace(/['\u2018\u2019]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .split(' ')
+    .filter((w) => w && !DESCRIPTOR_WORDS.has(w));
+}
+
+function editDistance(a, b) {
+  const m = a.length;
+  const n = b.length;
+  if (Math.abs(m - n) > 2) return 99;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) {
+      cur[j] = Math.min(
+        prev[j] + 1,
+        cur[j - 1] + 1,
+        prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)
+      );
+    }
+    prev = cur;
+  }
+  return prev[n];
+}
+
+// Two tokens are "the same word" if one abbreviates the other (Sam/Samuel) or
+// they differ by a single character in a long word (Lunazul/Lanazul).
+function tokensMatch(a, b) {
+  if (a === b) return true;
+  const [short, long] = a.length <= b.length ? [a, b] : [b, a];
+  if (short.length >= 3 && long.startsWith(short)) return true;
+  if (short.length >= 6 && editDistance(a, b) <= 1) return true;
+  return false;
+}
+
+// True when an off-APL entry is really an APL brand under different wording.
+// Deliberately conservative: every token must line up, so "Don Julio Reposado"
+// stays off-APL against an APL that only carries "Don Julio Blanco".
+function matchesAplBrand(offName, aplBrands) {
+  const off = offAplTokens(offName);
+  if (off.length === 0) return null;
+
+  for (const b of aplBrands || []) {
+    const apl = offAplTokens(b.name);
+    if (apl.length === 0) continue;
+
+    // Same number of meaningful tokens, matching position for position.
+    // Allowing the APL name to be one token shorter let a general entry
+    // swallow a specific SKU — "Hendrick's" absorbing "Hendrick's Neptunia",
+    // "Casa Noble Blanco" absorbing "Casamigos". Descriptor words are already
+    // stripped from both sides, so a genuine rewording lands on equal counts.
+    if (off.length !== apl.length) continue;
+    let ok = true;
+    for (let i = 0; i < off.length; i++) {
+      if (!tokensMatch(off[i], apl[i])) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) return b;
+  }
+  return null;
+}
+
+function aggregateOffApl(menuAnalyses, activeApl) {
+  const map = {}; // lowercased name -> { name, category, locations:{loc:count}, total }
+
+  menuAnalyses.forEach((menu) => {
+    const list = menu.off_apl_brands || menu.off_apl || [];
+    if (!Array.isArray(list)) return;
+
+    list.forEach((entry) => {
+      const name = (
+        typeof entry === 'string' ? entry : entry?.name || ''
+      ).trim();
+      if (!name) return;
+
+      const key = name.toLowerCase();
+      const category =
+        typeof entry === 'object' && entry?.category ? entry.category : '';
+      const hits =
+        typeof entry === 'object' && Array.isArray(entry?.where)
+          ? entry.where.length || 1
+          : 1;
+
+      if (!map[key]) {
+        map[key] = { name, category, locations: {}, total: 0 };
+      }
+      map[key].total += hits;
+      map[key].locations[menu.location] =
+        (map[key].locations[menu.location] || 0) + hits;
+      if (!map[key].category && category) map[key].category = category;
+    });
+  });
+
+  // Drop anything that is actually an APL brand written differently. It's
+  // already counted in brand_impressions, so leaving it here would show the
+  // same product as both billed and "not in APL" on the same report.
+  const aplBrands = activeApl?.brands || [];
+  return Object.values(map)
+    .filter((entry) => !matchesAplBrand(entry.name, aplBrands))
+    .sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
 }
 
 // ---------------------------------------------------------------------------
@@ -2113,12 +3905,70 @@ function parseStructuredXlsxApl(workbook) {
   const brands = [];
   const seen = new Set();
 
-  // Heuristic: a brand string that looks like a category header
-  // (e.g., "RUM - 10", "TEQUILA - 17 (order silver - extra anejo)")
+  // Category headers: "RUM - 7", "WHITE WINE (750 mL) - 6",
+  // "TEQUILA - 17 (order silver - extra anejo)".
   const looksLikeCategoryHeader = (s) => {
-    if (/^[A-Z/\s\-]+ - \d+/.test(s)) return true;
-    if (/.+- \d+\s*\(.+\)?\s*$/.test(s)) return true;
+    const t = s.trim();
+    if (/ - \d+\s*$/.test(t)) return true;
+    if (/ - \d+\s*\(.*\)\s*$/.test(t)) return true;
+    if (/^[A-Z/\s\-]+ - \d+/.test(t)) return true;
+    if (t.toUpperCase() === 'APL BAR MANDATE') return true;
+    if (t.toUpperCase() === 'BAR STANDARDS APL MANDATE') return true;
+    // Alterra-style APLs use this as a mid-zone divider before the
+    // non-mandatory brands. It is a section label, not a product.
+    if (t.toUpperCase() === 'OPTIONAL PRODUCTS') return true;
     return false;
+  };
+
+  // Sub-headers that sit BETWEEN the brand column and the SUPPLIER column.
+  // BEER uses STYLE, WINE uses VARIETAL. LIQUOR and NON ALC have neither.
+  // This is why brandCol is not always supplierCol - 1.
+  const SUB_HEADERS = new Set(['STYLE', 'VARIETAL', 'TYPE', 'CATEGORY']);
+
+  // Venue-approval markers and short venue codes that appear in the columns
+  // to the RIGHT of SUPPLIER and in repeated header rows.
+  const MARKER_TOKENS = new Set([
+    'X', 'BS', 'BSH', 'AB', 'LB', 'EL', 'EL2', 'FD', 'CS', 'B1', 'B2', 'B3',
+    'WB', 'RE', 'C', 'N/A', 'NA', '-', '--', '—', '•', '✓', '✔', 'YES', 'NO',
+    'LEGEND', 'KEY', 'LOCATIONS',
+  ]);
+  const looksLikeMarker = (s) => {
+    const t = s.trim();
+    if (!t) return true;
+    if (MARKER_TOKENS.has(t.toUpperCase())) return true;
+    if (t.length === 1) return true;
+    if (t.length <= 3 && /^[A-Z0-9]+$/.test(t) && !/[AEIOU]/.test(t)) return true;
+    return false;
+  };
+
+  const LEGEND_COLOR_WORDS = new Set([
+    'TAUPE', 'CORNFLOWER', 'ORANGE', 'TURQUOISE', 'SALMON', 'GREY', 'GRAY',
+    'WHITE', 'GREEN', 'RED', 'BLUE', 'YELLOW', 'PINK', 'PURPLE', 'BLACK',
+    'BROWN', 'BEIGE', 'TEAL', 'MAGENTA', 'CYAN', 'GOLD', 'SILVER', 'LAVENDER',
+    'SLATE', 'NAVY', 'OLIVE', 'MAROON', 'IVORY', 'CHARCOAL', 'MINT', 'PEACH',
+    'COLOR / ICON', 'COLOR/ICON', 'COLOR', 'ICON',
+  ]);
+  const looksLikeLegendSupplier = (s) =>
+    LEGEND_COLOR_WORDS.has(s.trim().toUpperCase());
+
+  // "VODKA - 11" -> "Vodka".  "WHITE WINE (750 mL) - 6" -> "White Wine".
+  // "TEQUILA / MEZCAL - 14" -> "Tequila / Mezcal".  Drops the count suffix,
+  // the volume parenthetical, and any trailing asterisk.
+  const cleanCategoryLabel = (raw) => {
+    let t = String(raw || '').trim();
+    if (!t) return '';
+    t = t.replace(/\s*-\s*\d+\s*$/, '');
+    t = t.replace(/\s*\([^)]*\)\s*/g, ' ');
+    t = t.replace(/\*/g, '').replace(/\s+/g, ' ').trim();
+    if (!t || t.toUpperCase() === 'SUPPLIER') return '';
+    if (t.length > 40) return '';
+    // Title-case the all-caps headers; leave mixed case ("Chardonnay") alone.
+    if (t === t.toUpperCase()) {
+      t = t
+        .toLowerCase()
+        .replace(/(^|[\s/])([a-z])/g, (m, p, ch) => p + ch.toUpperCase());
+    }
+    return t;
   };
 
   for (const sheetName of workbook.SheetNames) {
@@ -2129,81 +3979,104 @@ function parseStructuredXlsxApl(workbook) {
     const maxRow = range.e.r;
     const maxCol = range.e.c;
 
-    // Helper: read a cell's string value (0-indexed row + col)
     const cellAt = (r, c) => {
-      const addr = XLSX.utils.encode_cell({ r, c });
-      const cell = sheet[addr];
+      if (c < 0 || c > maxCol || r < 0 || r > maxRow) return '';
+      const cell = sheet[XLSX.utils.encode_cell({ r, c })];
       if (!cell || cell.v === undefined || cell.v === null) return '';
-      return String(cell.v).trim();
+      return String(cell.v).replace(/\s+/g, ' ').trim();
     };
 
-    // Step 1: find all unique SUPPLIER columns
-    const supplierCols = new Set();
+    // ---- Resolve each zone by walking LEFT from its SUPPLIER anchor. ----
+    //
+    // The old code voted for "leftmost non-empty cell in the zone", where the
+    // zone started just after the PREVIOUS supplier column. For a sheet with
+    // venue-approval columns, that start lands inside the previous zone's
+    // block of X-markers, so the vote elected a marker column as the brand
+    // column. Walking left from SUPPLIER is deterministic and can't drift.
+    const zones = new Map(); // supplierCol -> { brandCol, headerRows:Set }
+
     for (let r = 0; r <= maxRow; r++) {
       for (let c = 0; c <= maxCol; c++) {
-        if (cellAt(r, c).toUpperCase() === 'SUPPLIER') {
-          supplierCols.add(c);
+        if (cellAt(r, c).toUpperCase() !== 'SUPPLIER') continue;
+
+        let brandCol = c - 1;
+        while (brandCol >= 0 && SUB_HEADERS.has(cellAt(r, brandCol).toUpperCase())) {
+          brandCol -= 1;
         }
+        if (brandCol < 0) continue;
+
+        // Remember the STYLE/VARIETAL column too — for BEER and WINE it holds
+        // a far more useful per-row category ("Chardonnay") than the block
+        // header ("WHITE WINE - 6") does.
+        const subCol = c - 1 > brandCol ? c - 1 : -1;
+
+        if (!zones.has(c)) {
+          zones.set(c, { brandCol, subCol, headerRows: new Set() });
+        }
+        const zone = zones.get(c);
+        if (zone.subCol === -1 && subCol !== -1) zone.subCol = subCol;
+        // A repeated header row that omits STYLE must not pull the zone
+        // rightwards onto the sub-header column.
+        zone.brandCol = Math.min(zone.brandCol, brandCol);
+        zone.headerRows.add(r);
       }
     }
-    if (supplierCols.size === 0) continue;
-    const sortedSupCols = Array.from(supplierCols).sort((a, b) => a - b);
 
-    // Step 2: build column zones
-    const zones = [];
-    let prev = -1;
-    for (const sc of sortedSupCols) {
-      zones.push({ start: prev + 1, end: sc, supplierCol: sc });
-      prev = sc;
-    }
+    // ---- Read each zone top to bottom. ----
+    // Categories stack vertically inside one zone (VODKA, then RUM, then
+    // WHISKEY), each re-printing its own header row, so we scan every row and
+    // skip the header rows rather than stopping at the first one.
+    for (const [supplierCol, zone] of zones) {
+      // The category label lives in the brand column OF the header row
+      // ("VODKA - 11" sits directly left of "SUPPLIER"). Because categories
+      // stack down a zone, we track the most recent one as we descend.
+      let currentCategory = '';
 
-    // Step 3: for each zone, vote on the brand column
-    for (const zone of zones) {
-      const votes = {};
-      const headerRows = [];
       for (let r = 0; r <= maxRow; r++) {
-        if (cellAt(r, zone.supplierCol).toUpperCase() === 'SUPPLIER') {
-          headerRows.push(r);
-          for (let c = zone.start; c < zone.end; c++) {
-            if (cellAt(r, c)) {
-              votes[c] = (votes[c] || 0) + 1;
-              break;
-            }
-          }
+        if (zone.headerRows.has(r)) {
+          const label = cleanCategoryLabel(cellAt(r, zone.brandCol));
+          if (label) currentCategory = label;
+          continue;
         }
-      }
-      if (Object.keys(votes).length === 0) continue;
-      // Most votes wins; ties broken leftmost
-      const brandCol = Object.entries(votes)
-        .map(([k, v]) => [Number(k), v])
-        .sort((a, b) => b[1] - a[1] || a[0] - b[0])[0][0];
-      zone.brandCol = brandCol;
-      zone.headerRows = new Set(headerRows);
-    }
 
-    // Step 4: walk data rows for each zone
-    for (const zone of zones) {
-      if (zone.brandCol === undefined) continue;
-      for (let r = 0; r <= maxRow; r++) {
-        if (zone.headerRows.has(r)) continue;
         const brandRaw = cellAt(r, zone.brandCol);
-        const supplierRaw = cellAt(r, zone.supplierCol);
+        const supplierRaw = cellAt(r, supplierCol);
         if (!brandRaw || !supplierRaw) continue;
         if (supplierRaw.toUpperCase() === 'SUPPLIER') continue;
 
-        // Skip junk
         if (brandRaw.toUpperCase().startsWith('LOCATIONS')) continue;
         if (brandRaw.startsWith('*')) continue;
         if (looksLikeCategoryHeader(brandRaw)) continue;
-
-        // Skip suppliers that are clearly punctuation/junk
+        if (looksLikeMarker(brandRaw)) continue;
         if (supplierRaw.length < 2) continue;
+        if (looksLikeLegendSupplier(supplierRaw)) continue;
 
-        const key = `${brandRaw.toLowerCase()}|${supplierRaw.toLowerCase()}`;
+        // Strip the house-brand dagger so the same brand from two sheets
+        // aggregates into one row.
+        const name = brandRaw.replace(/\s*†\s*/g, ' ').replace(/\s+/g, ' ').trim();
+        if (!name || looksLikeMarker(name)) continue;
+
+        // A brand can legitimately appear twice under one supplier in two
+        // different categories — the OHM APL lists "New Amsterdam" under both
+        // VODKA and GIN, both Gallo. Keying on name+supplier alone deleted the
+        // second one, so the gin never reached the prompt and every menu
+        // mention of it was misfiled as off-APL. Category is part of identity.
+        const subType = zone.subCol >= 0 ? cellAt(r, zone.subCol) : '';
+        const category = subType && !looksLikeMarker(subType)
+          ? cleanCategoryLabel(subType)
+          : currentCategory;
+
+        const key = `${name.toLowerCase()}|${supplierRaw.toLowerCase()}|${String(
+          category
+        ).toLowerCase()}`;
         if (seen.has(key)) continue;
         seen.add(key);
 
-        brands.push({ name: brandRaw, supplier: supplierRaw });
+        brands.push(
+          category
+            ? { name, supplier: supplierRaw, category }
+            : { name, supplier: supplierRaw }
+        );
       }
     }
   }
@@ -2218,81 +4091,163 @@ function parseStructuredXlsxApl(workbook) {
 }
 
 // ---------------------------------------------------------------------------
-// Build the per-supplier email list from the aggregated analysis results.
+// Build one email per VENUE from the per-menu analyses.
+//
+// Note this reads results.menuAnalyses (one entry per menu/venue), NOT
+// results.aggregated (one entry per supplier). The recipients are venue
+// managers, so the report is organised around what's on THEIR menu rather
+// than around who supplies it.
 // ---------------------------------------------------------------------------
 
-function buildEmails(results) {
+function buildVenueEmails(results, activeApl) {
   const period = new Date().toLocaleDateString('en-US', {
     month: 'long',
     year: 'numeric',
   });
+  const stamp = new Date().toLocaleDateString();
 
-  // Map each supplier to their flagged compliance issues, by checking whether
-  // the issue's correct_name is one of that supplier's brands.
-  const supplierBrandNames = {};
-  results.aggregated.forEach((s) => {
-    supplierBrandNames[s.supplier] = new Set(Object.keys(s.brands));
-  });
-  const allIssues = results.menuAnalyses.flatMap((m) =>
-    (m.compliance_issues || []).map((i) => ({ ...i, location: m.location }))
-  );
+  // The model tags each mention with its source — "(image)", "(image text)",
+  // "(title)" — so one drink can appear three times for the same brand. Strip
+  // the tags and dedupe so the list under each brand stays short.
+  const MAX_CONTEXTS = 6;
+  const summariseCocktails = (list) => {
+    const seen = new Set();
+    const out = [];
+    for (const raw of Array.isArray(list) ? list : []) {
+      const name = String(raw || '')
+        .replace(/\s*\([^)]*\)\s*$/, '')
+        .trim();
+      if (!name) continue;
+      const key = name.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(name);
+    }
+    if (out.length === 0) return '';
+    if (out.length <= MAX_CONTEXTS) return out.join(', ');
+    return `${out.slice(0, MAX_CONTEXTS).join(', ')} +${
+      out.length - MAX_CONTEXTS
+    } more`;
+  };
 
-  return results.aggregated.map((supplier) => {
-    const issuesForSupplier = allIssues.filter((issue) =>
-      supplierBrandNames[supplier.supplier]?.has(issue.correct_name)
+  return results.menuAnalyses.map((menu) => {
+    // Group this venue's APL hits by supplier so the list reads in a sensible
+    // order rather than as one long undifferentiated run of brands.
+    const bySupplier = {};
+    let total = 0;
+    Object.entries(menu.brand_impressions || {}).forEach(([brand, data]) => {
+      const sup = String(data.supplier || 'UNKNOWN').trim();
+      const count = data.count || 0;
+      if (!bySupplier[sup]) bySupplier[sup] = [];
+      bySupplier[sup].push({
+        brand: normalizeBrandDisplay(brand),
+        count,
+        cocktails: data.cocktails || [],
+      });
+      total += count;
+    });
+
+    const supplierNames = Object.keys(bySupplier).sort();
+    const brandCount = supplierNames.reduce(
+      (n, s) => n + bySupplier[s].length,
+      0
     );
 
-    const locationLines = Object.entries(supplier.locations)
-      .map(([loc, count]) => `  • ${loc}: ${count} impressions`)
-      .join('\n');
+    const brandBlock = supplierNames.length
+      ? supplierNames
+          .map((sup) => {
+            const supTotal = bySupplier[sup].reduce((n, r) => n + r.count, 0);
+            const rows = bySupplier[sup]
+              .sort(
+                (a, b) => b.count - a.count || a.brand.localeCompare(b.brand)
+              )
+              .map((r) => {
+                const where = summariseCocktails(r.cocktails);
+                return where
+                  ? `    - ${r.brand}: ${r.count}\n        ${where}`
+                  : `    - ${r.brand}: ${r.count}`;
+              })
+              .join('\n');
+            return `  ${sup} (${supTotal})\n${rows}`;
+          })
+          .join('\n\n')
+      : '  No APL brands were detected on this menu.';
 
-    const brandLines = Object.entries(supplier.brands)
-      .map(([brand, count]) => `  • ${brand}: ${count} impressions`)
-      .join('\n');
+    // Drop notes where the menu already matches the APL exactly. The model
+    // flags these anyway and then explains, in the note itself, that there's
+    // no issue — which reads as incoherent to the recipient.
+    const issues = filterIssues(menu.compliance_issues, activeApl);
+    const complianceBlock = issues.length
+      ? `\n\nNAMING NOTES (${issues.length})
+These brands are on the menu but aren't written as the full product name:
+${issues
+  .map((i) => {
+    const where = cleanIssueContext(i.cocktail);
+    return `  ! "${i.found_text}"${
+      where ? ` in ${where}` : ''
+    } - should read "${i.correct_name}"`;
+  })
+  .join('\n')}`
+      : '';
 
-    const compliance =
-      issuesForSupplier.length > 0
-        ? `\n\nCOMPLIANCE NOTES:\n${issuesForSupplier
-            .map(
-              (issue) =>
-                `  ⚠ Found "${issue.found_text}" in ${issue.cocktail} (${issue.location}) — should be "${issue.correct_name}"`
-            )
-            .join(
-              '\n'
-            )}\n\nPlease review these with the venue to ensure proper brand representation.`
-        : '';
+    const offList = menu.off_apl_brands || menu.off_apl || [];
+    const offRows = (Array.isArray(offList) ? offList : [])
+      .map((b) => {
+        const name = String(typeof b === 'string' ? b : b?.name || '').trim();
+        if (!name) return '';
+        const cat =
+          typeof b === 'object' && b?.category ? ` (${b.category})` : '';
+        const where =
+          typeof b === 'object' && Array.isArray(b?.where) && b.where.length
+            ? ` - ${b.where.join(', ')}`
+            : '';
+        return `  - ${name}${cat}${where}`;
+      })
+      .filter(Boolean);
 
-    const body = `Dear ${supplier.supplier} team,
+    const offBlock = offRows.length
+      ? `\n\nNOT ON THE APL (${offRows.length})
+Branded products on this menu that aren't part of the current APL. Listed for
+awareness only - these are not counted as impressions:
+${offRows.join('\n')}`
+      : '';
 
-Please find your APL impression report for ${period}.
+    const body = `Hi there,
+
+Here is the menu report for ${menu.location} - ${period}.
 
 SUMMARY
-Total impressions: ${supplier.total}
+  Total APL impressions: ${total}
+  APL brands present: ${brandCount}
+  Suppliers represented: ${supplierNames.length}
 
-BY LOCATION:
-${locationLines}
+APL BRAND IMPRESSIONS
+${brandBlock}${complianceBlock}${offBlock}
 
-BY BRAND:
-${brandLines}${compliance}
+Every appearance of an APL brand counts as one impression - recipe ingredients,
+spirits lists, cocktail titles, and brands visible in menu photography are each
+counted separately.
 
-This report reflects all detected mentions of your brands across our menu analysis for the period.
-
-If you have any questions, please reply directly to this email.
+If anything above looks wrong, reply to this email and we'll take another look.
 
 Best regards,
 The Ignite Team
 
-—
-Generated by Fire Watch - Ignite Creative Services LLC · ${new Date().toLocaleDateString()}`;
+--
+Generated by Fire Watch - Ignite Creative Services LLC - ${stamp}
+Source menu: ${menu.filename}`;
 
     return {
-      supplier: supplier.supplier,
-      to:
-        SUPPLIER_EMAILS[supplier.supplier] ||
-        `reports@${supplier.supplier.toLowerCase().replace(/[^a-z0-9]/g, '')}.com`,
-      subject: `APL Impression Report — ${period}`,
+      location: menu.location,
+      filename: menu.filename,
+      to: [],
+      subject: `Menu Report - ${menu.location} - ${period}`,
       body,
-      totalImpressions: supplier.total,
+      totalImpressions: total,
+      brandCount,
+      supplierCount: supplierNames.length,
+      issueCount: issues.length,
+      offAplCount: offRows.length,
     };
   });
 }
