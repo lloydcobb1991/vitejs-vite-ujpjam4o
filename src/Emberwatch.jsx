@@ -152,6 +152,7 @@ export default function Emberwatch() {
   const [progress, setProgress] = useState('');
   const [view, setView] = useState('upload'); // 'upload' | 'results' | 'email'
   const [customApl, setCustomApl] = useState(null); // { name, brands } or null
+  const [fileLabels, setFileLabels] = useState({}); // filename -> group label
   const [aplError, setAplError] = useState(null);
   const aplInputRef = useRef(null);
 
@@ -162,6 +163,29 @@ export default function Emberwatch() {
     setUploadedFiles(files);
     setResults(null);
     setError(null);
+    // Seed a default label for anything new, without clobbering labels the
+    // user has already edited for files that are still in the list.
+    setFileLabels((prev) => {
+      const next = {};
+      for (const f of files) {
+        next[f.name] = prev[f.name] ?? defaultLabelFromFilename(f.name);
+      }
+      return next;
+    });
+  };
+
+  const setFileLabel = (filename, value) => {
+    setFileLabels((prev) => ({ ...prev, [filename]: value }));
+  };
+
+  // Apply one label to every uploaded file — the common case when a whole
+  // batch belongs to a single property.
+  const setAllFileLabels = (value) => {
+    setFileLabels(() => {
+      const next = {};
+      for (const f of uploadedFiles) next[f.name] = value;
+      return next;
+    });
   };
 
   // ----- Custom APL upload -----
@@ -242,6 +266,17 @@ export default function Emberwatch() {
       return;
     }
 
+    // A failed APL upload leaves customApl null, which silently reverts
+    // activeApl to the built-in list. Running 39 client menus against the
+    // wrong brand list produces a clean-looking, completely wrong report —
+    // far more dangerous than a crash. Refuse to run until it's resolved.
+    if (aplError) {
+      setError(
+        `The uploaded APL didn't parse, so Fire Watch would fall back to the ${APL_DATA.brands.length}-brand built-in list. Re-upload a valid APL, or click "Use Built-in" to run against the built-in list deliberately.`
+      );
+      return;
+    }
+
     setAnalyzing(true);
     setError(null);
     setProgress('Converting PDFs...');
@@ -276,7 +311,7 @@ export default function Emberwatch() {
         try {
           const analysis = await analyzeMenuWithClaude(fileData);
           menuAnalyses.push({
-            location: extractLocation(fileData.name),
+            location: resolveLocation(fileData.name),
             filename: fileData.name,
             ...analysis,
           });
@@ -285,7 +320,7 @@ export default function Emberwatch() {
           const msg = menuErr.message || String(menuErr);
           failedMenus.push({
             filename: fileData.name,
-            location: extractLocation(fileData.name),
+            location: resolveLocation(fileData.name),
             error: msg,
           });
           if (msg.startsWith('ACCOUNT:')) {
@@ -317,7 +352,7 @@ export default function Emberwatch() {
 
       setProgress('Aggregating results...');
       const aggregated = aggregateBySupplier(menuAnalyses);
-      const offApl = aggregateOffApl(menuAnalyses);
+      const offApl = aggregateOffApl(menuAnalyses, activeApl);
 
       setResults({ menuAnalyses, aggregated, offApl, failedMenus });
       setView('results');
@@ -331,9 +366,44 @@ export default function Emberwatch() {
     }
   };
 
+  // Brand names that appear more than once in the active APL under different
+  // categories. These are the only ones that need a category tag in the prompt.
+  const ambiguousAplNames = (() => {
+    const byName = new Map();
+    for (const b of activeApl.brands) {
+      const k = String(b.name || '').trim().toLowerCase();
+      if (!byName.has(k)) byName.set(k, []);
+      byName.get(k).push(String(b.category || '').toLowerCase());
+    }
+    const out = new Set();
+    for (const [name, cats] of byName) {
+      if (cats.length < 2) continue;
+      // If the brand name already spells out one of its own categories, the
+      // repeat is a cross-listing of ONE product in two blocks (High Noon
+      // Peach Vodka Seltzer under both RTD's and Seltzer), not two different
+      // products. Tagging those would split one brand across two keys.
+      const selfIdentifying = cats.some((cat) =>
+        cat
+          .split(/[^a-z]+/)
+          .filter((w) => w.length >= 4)
+          .some((w) => name.includes(w))
+      );
+      if (!selfIdentifying) out.add(name);
+    }
+    return out;
+  })();
+
   const analyzeMenuWithClaude = async ({ name, base64 }) => {
     const brandList = activeApl.brands
-      .map((b) => `- ${b.name} (${b.supplier})`)
+      .map((b) => {
+        // Only surface the category when it actually disambiguates. Tagging
+        // every line adds noise; tagging the collisions is what stops
+        // "New Amsterdam Gin" being read as a non-APL product.
+        const dupe = ambiguousAplNames.has(b.name.trim().toLowerCase());
+        return dupe && b.category
+          ? `- ${b.name} [${b.category}] (${b.supplier})`
+          : `- ${b.name} (${b.supplier})`;
+      })
       .join('\n');
 
     const response = await fetch(`${API_BASE}/api/analyze`, {
@@ -508,6 +578,14 @@ Examples:
 
 Always put the supplier in the separate "supplier" field, never in the brand name key. Always strip trailing region/origin descriptors. The brand name should be clean and consistent so identical brands across multiple menus aggregate correctly.
 
+**BRACKETED CATEGORY TAGS.**
+A few APL lines carry a category in square brackets, like "- New Amsterdam [Vodka] (GALLO)" and "- New Amsterdam [Gin] (GALLO)". This happens when one brand name covers two different products from the same supplier. The bracket is there to help you tell them apart:
+- Match the menu mention to the right one using its category. "New Amsterdam Gin" on a menu matches the [Gin] line, not the [Vodka] line.
+- Both are on the APL. Neither is an off-APL brand. Never place a bracketed variant in off_apl_brands just because the menu spells out the category.
+- For these bracketed entries ONLY, include the category in the JSON key so the two do not merge: use "New Amsterdam (Gin)" and "New Amsterdam (Vodka)" as separate keys.
+- If the menu says only "New Amsterdam" with no category and context does not resolve it, count it under whichever variant the surrounding drinks suggest, and add a compliance note that the menu does not specify which product.
+- Lines WITHOUT brackets keep the plain brand name as the key, exactly as described elsewhere.
+
 **USE THE APL CANONICAL FORM AS THE KEY, NOT THE MENU'S WORDING.**
 Regardless of how the menu writes a brand, use the cleaned APL form as the JSON key. Examples:
 - Menu says "Oban 14yr" → APL has "Oban - 14 year old (Highland)" → JSON key: "Oban 14 year old"
@@ -591,11 +669,15 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
     return parseClaudeJson(text);
   };
 
-  const extractLocation = (filename) => {
-    if (filename.includes('NYC')) return 'New York City';
-    if (filename.includes('LV')) return 'Las Vegas';
-    if (filename.includes('DC')) return 'Washington DC';
-    return filename.replace(/[^a-zA-Z0-9]/g, ' ');
+  // Which group a menu belongs to. Defaults to a tidied filename, but the
+  // label the user typed on the upload screen always wins. Grouping is
+  // deliberately free text: reports go out per property most of the time, but
+  // sometimes per region, so hard-coding a hierarchy would be wrong by
+  // next quarter.
+  const resolveLocation = (filename) => {
+    const typed = fileLabels[filename];
+    if (typed && typed.trim()) return typed.trim();
+    return defaultLabelFromFilename(filename);
   };
 
   const aggregateBySupplier = (menuAnalyses) => {
@@ -607,7 +689,7 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
     menuAnalyses.forEach((menu) => {
       Object.entries(menu.brand_impressions || {}).forEach(([brand, data]) => {
         const supplier = data.supplier || 'UNKNOWN';
-        const brandKey = brand.trim().toLowerCase();
+        const brandKey = normalizeBrandKey(brand);
 
         if (!supplierTotals[supplier]) {
           supplierTotals[supplier] = { total: 0, brands: {}, locations: {} };
@@ -616,7 +698,7 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
 
         // Pick display name: first one we see for this normalized key
         if (!canonicalDisplayName[supplier][brandKey]) {
-          canonicalDisplayName[supplier][brandKey] = brand.trim();
+          canonicalDisplayName[supplier][brandKey] = normalizeBrandDisplay(brand);
         }
         const displayName = canonicalDisplayName[supplier][brandKey];
 
@@ -637,43 +719,52 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
   // brand_impressions map, matching case-insensitively.
   const findMenuBrandCount = (menu, brandName) => {
     if (!menu || !menu.brand_impressions) return 0;
-    const target = brandName.trim().toLowerCase();
+    // Sum rather than return-first: one menu can carry both "Brand (Gin)" and
+    // "Brand [Gin]" if the model wavered mid-response, and both belong here.
+    const target = normalizeBrandKey(brandName);
+    let total = 0;
     for (const [name, data] of Object.entries(menu.brand_impressions)) {
-      if (name.trim().toLowerCase() === target) {
-        return data.count || 0;
+      if (normalizeBrandKey(name) === target) {
+        total += data.count || 0;
       }
     }
-    return 0;
+    return total;
   };
 
   const exportToCSV = () => {
     if (!results) return;
 
-    const rows = [
-      ['Supplier', 'Brand', 'NYC', 'Las Vegas', 'Washington DC', 'Total'],
-    ];
+    const rows = [];
+
+    // Columns come from the groups actually present in this batch, not from a
+    // fixed list of cities. The old header was hard-coded to NYC / Las Vegas /
+    // Washington DC, so every other client exported a wall of zeros next to a
+    // correct total.
+    const groups = [...new Set(results.menuAnalyses.map((m) => m.location))]
+      .filter(Boolean)
+      .sort((a, b) => a.localeCompare(b));
+
+    // Several menus can share one group — a property with a lunch menu, a
+    // drinks menu and a banquet playbook is still one property — so sum across
+    // every menu in the group rather than taking the first match.
+    const countForGroup = (group, brand) =>
+      results.menuAnalyses
+        .filter((m) => m.location === group)
+        .reduce((n, m) => n + findMenuBrandCount(m, brand), 0);
+
+    const csvCell = (v) => {
+      const t = String(v ?? '');
+      return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t;
+    };
+
+    rows.push(['Supplier', 'Brand', ...groups, 'Total']);
 
     results.aggregated.forEach((supplier) => {
       Object.entries(supplier.brands).forEach(([brand, totalCount]) => {
-        const nycCount = findMenuBrandCount(
-          results.menuAnalyses.find((m) => m.location === 'New York City'),
-          brand
-        );
-        const lvCount = findMenuBrandCount(
-          results.menuAnalyses.find((m) => m.location === 'Las Vegas'),
-          brand
-        );
-        const dcCount = findMenuBrandCount(
-          results.menuAnalyses.find((m) => m.location === 'Washington DC'),
-          brand
-        );
-
         rows.push([
           supplier.supplier,
           brand,
-          nycCount,
-          lvCount,
-          dcCount,
+          ...groups.map((g) => countForGroup(g, brand)),
           totalCount,
         ]);
       });
@@ -690,11 +781,13 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
           .map(([loc, c]) => `${loc} (${c})`)
           .join('; ');
         // Quote the free-text fields so any stray commas don't break columns.
-        rows.push([`"${b.name}"`, b.category || '', `"${locs}"`, b.total]);
+        rows.push([csvCell(b.name), csvCell(b.category || ''), csvCell(locs), b.total]);
       });
     }
 
-    const csv = rows.map((row) => row.join(',')).join('\n');
+    const csv = rows
+      .map((row) => row.map((cell) => csvCell(cell)).join(','))
+      .join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -742,6 +835,10 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
           onAplDrop={handleAplDrop}
           onClearApl={clearCustomApl}
           onFilesChange={handleFilesChange}
+          fileLabels={fileLabels}
+          onFileLabelChange={setFileLabel}
+          onApplyLabelToAll={setAllFileLabels}
+          defaultLabelFor={defaultLabelFromFilename}
           onAnalyze={analyzeMenus}
         />
       )}
@@ -789,6 +886,10 @@ function UploadView({
   onAplDrop,
   onClearApl,
   onFilesChange,
+  fileLabels,
+  onFileLabelChange,
+  onApplyLabelToAll,
+  defaultLabelFor,
   onAnalyze,
 }) {
   // Local drag state so the APL card can highlight while a file is being
@@ -1000,12 +1101,182 @@ function UploadView({
           disabled={analyzing}
         />
 
+        {uploadedFiles.length > 0 && (
+          <div
+            style={{
+              margin: '28px 0 8px',
+              padding: '24px 28px',
+              background: '#fafafa',
+              border: '2px solid #ececec',
+              borderRadius: '12px',
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'flex-end',
+                flexWrap: 'wrap',
+                gap: '12px',
+                marginBottom: '6px',
+              }}
+            >
+              <div>
+                <div
+                  style={{
+                    fontSize: '11px',
+                    fontWeight: '800',
+                    color: '#999',
+                    letterSpacing: '2px',
+                    textTransform: 'uppercase',
+                  }}
+                >
+                  Report Grouping
+                </div>
+                <div
+                  style={{
+                    fontSize: '13px',
+                    color: '#666',
+                    marginTop: '4px',
+                    fontWeight: '500',
+                    lineHeight: '1.6',
+                    maxWidth: '640px',
+                  }}
+                >
+                  These become the columns in the export and one email per
+                  group. Give several menus the same label to roll them up —
+                  a property with a lunch menu, a drinks menu and a banquet
+                  playbook is still one property.
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  const first = uploadedFiles[0];
+                  const seed =
+                    (first && fileLabels[first.name]) ||
+                    (first && defaultLabelFor(first.name)) ||
+                    '';
+                  const value = window.prompt(
+                    'Label every uploaded menu as:',
+                    seed
+                  );
+                  if (value !== null && value.trim()) {
+                    onApplyLabelToAll(value.trim());
+                  }
+                }}
+                disabled={analyzing}
+                style={{
+                  background: 'white',
+                  color: '#da291c',
+                  border: '2px solid #da291c',
+                  padding: '10px 18px',
+                  borderRadius: '8px',
+                  fontSize: '12px',
+                  fontWeight: '800',
+                  cursor: analyzing ? 'not-allowed' : 'pointer',
+                  textTransform: 'uppercase',
+                  letterSpacing: '1px',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                Same label for all
+              </button>
+            </div>
+
+            <div
+              style={{
+                display: 'grid',
+                gap: '8px',
+                marginTop: '18px',
+                maxHeight: '340px',
+                overflowY: 'auto',
+                overflowX: 'hidden',
+              }}
+            >
+              {uploadedFiles.map((f) => (
+                <div
+                  key={f.name}
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)',
+                    gap: '12px',
+                    alignItems: 'center',
+                  }}
+                >
+                  <div
+                    title={f.name}
+                    style={{
+                      fontSize: '13px',
+                      color: '#888',
+                      fontWeight: '600',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {f.name}
+                  </div>
+                  <input
+                    type="text"
+                    value={fileLabels[f.name] ?? ''}
+                    disabled={analyzing}
+                    placeholder={defaultLabelFor(f.name)}
+                    onChange={(e) => onFileLabelChange(f.name, e.target.value)}
+                    style={{
+                      width: '100%',
+                      padding: '9px 12px',
+                      fontSize: '14px',
+                      border: '2px solid #ddd',
+                      borderRadius: '8px',
+                      fontWeight: '700',
+                      color: '#1a1a1a',
+                      background: 'white',
+                    }}
+                  />
+                </div>
+              ))}
+            </div>
+
+            <div
+              style={{
+                marginTop: '14px',
+                fontSize: '12px',
+                color: '#999',
+                fontWeight: '600',
+              }}
+            >
+              {new Set(
+                uploadedFiles.map(
+                  (f) =>
+                    (fileLabels[f.name] || '').trim() || defaultLabelFor(f.name)
+                )
+              ).size}{' '}
+              group
+              {new Set(
+                uploadedFiles.map(
+                  (f) =>
+                    (fileLabels[f.name] || '').trim() || defaultLabelFor(f.name)
+                )
+              ).size === 1
+                ? ''
+                : 's'}{' '}
+              across {uploadedFiles.length} menu
+              {uploadedFiles.length === 1 ? '' : 's'}
+            </div>
+          </div>
+        )}
+
         <button
           onClick={onAnalyze}
-          disabled={analyzing || uploadedFiles.length === 0}
+          disabled={analyzing || uploadedFiles.length === 0 || !!aplError}
+          title={
+            aplError
+              ? 'Resolve the APL error above before analyzing'
+              : ''
+          }
           style={{
             width: '100%',
-            background: analyzing ? '#999' : '#da291c',
+            background: analyzing || aplError ? '#999' : '#da291c',
             color: 'white',
             border: 'none',
             padding: '28px',
@@ -1013,7 +1284,7 @@ function UploadView({
             fontSize: '24px',
             fontWeight: '900',
             cursor:
-              analyzing || uploadedFiles.length === 0
+              analyzing || uploadedFiles.length === 0 || aplError
                 ? 'not-allowed'
                 : 'pointer',
             textTransform: 'uppercase',
@@ -1076,6 +1347,63 @@ function UploadView({
 // found_text is a paragraph of reasoning instead of the string on the menu.
 // None of them survive here.
 // ---------------------------------------------------------------------------
+
+// The model is asked to key category variants as "Brand (Category)", but it
+// sometimes echoes the APL's own "Brand [Category]" bracket form instead.
+// On one menu that's cosmetic; across a 39-menu batch the two forms land in
+// separate rows and the brand fragments. Normalising here is deterministic —
+// it doesn't depend on the model following formatting instructions.
+const normalizeBrandKey = (raw) =>
+  String(raw || '')
+    .replace(/\[([^\]]*)\]/g, '($1)')
+    .replace(/\s*\(\s*/g, ' (')
+    .replace(/\s*\)\s*/g, ') ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+
+// Same normalisation, but preserving case for what's shown on screen and in
+// the CSV. Bracket form becomes paren form so one brand reads one way.
+const normalizeBrandDisplay = (raw) =>
+  String(raw || '')
+    .replace(/\[([^\]]*)\]/g, '($1)')
+    .replace(/\s*\(\s*/g, ' (')
+    .replace(/\s*\)\s*/g, ') ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+// Turn a menu filename into a readable default group label.
+//   "w25_JAH_v3b.pdf"                -> "W25 JAH"
+//   "EmbassyDenton-EDITS (1).pdf"    -> "Embassy Denton"
+//   "Snow Summit F B Playbook.pdf"   -> "Snow Summit F B Playbook"
+// Deliberately conservative: it tidies obvious noise and stops. The user can
+// always overwrite it, and a wrong guess that looks plausible is worse than an
+// ugly one that prompts an edit.
+function defaultLabelFromFilename(filename) {
+  let t = String(filename || '').trim();
+  t = t.replace(/\.[A-Za-z0-9]{1,5}$/, '');          // extension
+  // Repeat: browsers hand back "file (1) (1).pdf" after two downloads, and a
+  // single pass leaves one behind.
+  for (let i = 0; i < 4; i++) {
+    const before = t;
+    t = t.replace(/[\s_-]*\(\s*\d+\s*\)\s*$/, '');
+    t = t.replace(/[\s_-]*__\d+_\s*$/, '');
+    if (t === before) break;
+  }
+  t = t.replace(/[_]+/g, ' ');
+  t = t.replace(/-{2,}/g, ' ');
+  t = t.replace(/\bv\d+[a-z]?\b/gi, '');             // version tokens: v2, v3b
+  t = t.replace(/\b(final|edits?|draft|copy|rev\d*)\b/gi, '');
+  t = t.replace(/\bpdf\b/gi, '');
+  t = t.replace(/\s+/g, ' ').trim();
+  // Words removed above can strand punctuation: "EmbassyDenton-EDITS" -> "EmbassyDenton-".
+  t = t.replace(/^[\s\-–—_.,;:]+|[\s\-–—_.,;:]+$/g, '').trim();
+  // Split camelCase runs so "EmbassyDenton" reads as two words.
+  t = t.replace(/([a-z])([A-Z])/g, '$1 $2');
+  t = t.replace(/\s+/g, ' ').trim();
+  t = t.replace(/^[\s\-–—_.,;:]+|[\s\-–—_.,;:]+$/g, '').trim();
+  return t || String(filename || '').trim();
+}
 
 function filterIssues(issues, activeApl) {
   const aplNames = new Set(
@@ -1258,6 +1586,42 @@ function ResultsView({ results, activeApl, onNew, onExport, onOpenEmail }) {
             {results.aggregated.reduce((sum, s) => sum + s.total, 0)} total
             impressions
           </p>
+          {/* Which APL produced these numbers. Two separate batches have now
+              been run against the wrong brand list and looked entirely
+              plausible; the only tell was buried on the upload screen. */}
+          <div
+            style={{
+              marginTop: '12px',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '8px',
+              background: 'rgba(0,0,0,0.22)',
+              border: '1px solid rgba(255,255,255,0.35)',
+              borderRadius: '30px',
+              padding: '8px 18px',
+            }}
+          >
+            <FileText size={16} color="white" />
+            <span
+              style={{
+                color: 'white',
+                fontSize: '14px',
+                fontWeight: '800',
+                letterSpacing: '0.2px',
+              }}
+            >
+              {activeApl.name}
+            </span>
+            <span
+              style={{
+                color: 'rgba(255,255,255,0.85)',
+                fontSize: '13px',
+                fontWeight: '600',
+              }}
+            >
+              · {activeApl.brands.length} brands
+            </span>
+          </div>
         </div>
         <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
           <button
@@ -3056,7 +3420,102 @@ function extractFirstJsonObject(s) {
 // purely as a manual-review aid ("what else is this venue carrying?").
 // ---------------------------------------------------------------------------
 
-function aggregateOffApl(menuAnalyses) {
+// ---------------------------------------------------------------------------
+// Deciding whether an "off-APL" brand is really off-APL.
+//
+// The model is asked to keep these lists disjoint, and mostly it does — but
+// it's a fuzzy judgement made per menu, so the same batch can bill "Samuel
+// Adams Boston Lager" and simultaneously list "Sam Adams Boston Lager" as a
+// competitor product. Across 39 menus that inflates the review list and makes
+// coverage look worse than it is. Prompt wording can't fix an intermittent
+// judgement; a deterministic check after the fact can.
+// ---------------------------------------------------------------------------
+
+// Words that describe a product rather than name it. Menus append them freely
+// ("Ford's Gin", "Canyon Road Wines"); APLs usually don't.
+const DESCRIPTOR_WORDS = new Set([
+  'vodka', 'gin', 'rum', 'tequila', 'mezcal', 'whiskey', 'whisky', 'bourbon',
+  'scotch', 'brandy', 'cognac', 'liqueur', 'cordial', 'vermouth', 'beer',
+  'lager', 'ale', 'ipa', 'pilsner', 'stout', 'porter', 'cider', 'seltzer',
+  'wine', 'wines', 'champagne', 'prosecco', 'sparkling',
+  'na', 'nonalcoholic', 'non', 'alcoholic', 'hard', 'the', 'brand', 'brands',
+]);
+// Deliberately NOT descriptors: blanco, silver, reposado, añejo, 12, 1942.
+// Those distinguish one SKU from another — "Don Julio Blanco" and "Don Julio
+// Reposado" are different products and only one may be approved.
+
+function offAplTokens(raw) {
+  return String(raw || '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\([^)]*\)/g, ' ')
+    .toLowerCase()
+    .replace(/['\u2018\u2019]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .split(' ')
+    .filter((w) => w && !DESCRIPTOR_WORDS.has(w));
+}
+
+function editDistance(a, b) {
+  const m = a.length;
+  const n = b.length;
+  if (Math.abs(m - n) > 2) return 99;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) {
+      cur[j] = Math.min(
+        prev[j] + 1,
+        cur[j - 1] + 1,
+        prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)
+      );
+    }
+    prev = cur;
+  }
+  return prev[n];
+}
+
+// Two tokens are "the same word" if one abbreviates the other (Sam/Samuel) or
+// they differ by a single character in a long word (Lunazul/Lanazul).
+function tokensMatch(a, b) {
+  if (a === b) return true;
+  const [short, long] = a.length <= b.length ? [a, b] : [b, a];
+  if (short.length >= 3 && long.startsWith(short)) return true;
+  if (short.length >= 6 && editDistance(a, b) <= 1) return true;
+  return false;
+}
+
+// True when an off-APL entry is really an APL brand under different wording.
+// Deliberately conservative: every token must line up, so "Don Julio Reposado"
+// stays off-APL against an APL that only carries "Don Julio Blanco".
+function matchesAplBrand(offName, aplBrands) {
+  const off = offAplTokens(offName);
+  if (off.length === 0) return null;
+
+  for (const b of aplBrands || []) {
+    const apl = offAplTokens(b.name);
+    if (apl.length === 0) continue;
+
+    // Same number of meaningful tokens, matching position for position.
+    // Allowing the APL name to be one token shorter let a general entry
+    // swallow a specific SKU — "Hendrick's" absorbing "Hendrick's Neptunia",
+    // "Casa Noble Blanco" absorbing "Casamigos". Descriptor words are already
+    // stripped from both sides, so a genuine rewording lands on equal counts.
+    if (off.length !== apl.length) continue;
+    let ok = true;
+    for (let i = 0; i < off.length; i++) {
+      if (!tokensMatch(off[i], apl[i])) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) return b;
+  }
+  return null;
+}
+
+function aggregateOffApl(menuAnalyses, activeApl) {
   const map = {}; // lowercased name -> { name, category, locations:{loc:count}, total }
 
   menuAnalyses.forEach((menu) => {
@@ -3087,9 +3546,13 @@ function aggregateOffApl(menuAnalyses) {
     });
   });
 
-  return Object.values(map).sort((a, b) =>
-    a.name.toLowerCase().localeCompare(b.name.toLowerCase())
-  );
+  // Drop anything that is actually an APL brand written differently. It's
+  // already counted in brand_impressions, so leaving it here would show the
+  // same product as both billed and "not in APL" on the same report.
+  const aplBrands = activeApl?.brands || [];
+  return Object.values(map)
+    .filter((entry) => !matchesAplBrand(entry.name, aplBrands))
+    .sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
 }
 
 // ---------------------------------------------------------------------------
@@ -3208,43 +3671,70 @@ function parseStructuredXlsxApl(workbook) {
   const brands = [];
   const seen = new Set();
 
-  // Heuristic: a brand string that looks like a category header
-  // (e.g., "RUM - 10", "TEQUILA - 17 (order silver - extra anejo)")
+  // Category headers: "RUM - 7", "WHITE WINE (750 mL) - 6",
+  // "TEQUILA - 17 (order silver - extra anejo)".
   const looksLikeCategoryHeader = (s) => {
-    if (/^[A-Z/\s\-]+ - \d+/.test(s)) return true;
-    if (/.+- \d+\s*\(.+\)?\s*$/.test(s)) return true;
+    const t = s.trim();
+    if (/ - \d+\s*$/.test(t)) return true;
+    if (/ - \d+\s*\(.*\)\s*$/.test(t)) return true;
+    if (/^[A-Z/\s\-]+ - \d+/.test(t)) return true;
+    if (t.toUpperCase() === 'APL BAR MANDATE') return true;
+    if (t.toUpperCase() === 'BAR STANDARDS APL MANDATE') return true;
+    // Alterra-style APLs use this as a mid-zone divider before the
+    // non-mandatory brands. It is a section label, not a product.
+    if (t.toUpperCase() === 'OPTIONAL PRODUCTS') return true;
     return false;
   };
 
-  // Layout markers used in location-approval columns and legend keys.
-  // These get mis-picked as brand names when the parser's brand-column
-  // vote drifts to a column full of X-markers instead of the real brand
-  // column. Reject any single/short-token marker up front.
+  // Sub-headers that sit BETWEEN the brand column and the SUPPLIER column.
+  // BEER uses STYLE, WINE uses VARIETAL. LIQUOR and NON ALC have neither.
+  // This is why brandCol is not always supplierCol - 1.
+  const SUB_HEADERS = new Set(['STYLE', 'VARIETAL', 'TYPE', 'CATEGORY']);
+
+  // Venue-approval markers and short venue codes that appear in the columns
+  // to the RIGHT of SUPPLIER and in repeated header rows.
   const MARKER_TOKENS = new Set([
-    'X', 'BS', 'AB', 'N/A', 'NA', '-', '--', '—', '•', '✓', '✔', 'YES', 'NO',
-    'LEGEND', 'KEY',
+    'X', 'BS', 'BSH', 'AB', 'LB', 'EL', 'EL2', 'FD', 'CS', 'B1', 'B2', 'B3',
+    'WB', 'RE', 'C', 'N/A', 'NA', '-', '--', '—', '•', '✓', '✔', 'YES', 'NO',
+    'LEGEND', 'KEY', 'LOCATIONS',
   ]);
   const looksLikeMarker = (s) => {
-    const trimmed = s.trim();
-    if (!trimmed) return true;
-    if (MARKER_TOKENS.has(trimmed.toUpperCase())) return true;
-    // Any single letter or single symbol is a marker, not a brand name
-    if (trimmed.length === 1) return true;
-    // 2-3 char all-caps with no vowels is almost certainly a marker code (BS, XX, AB)
-    if (trimmed.length <= 3 && /^[A-Z]+$/.test(trimmed) && !/[AEIOU]/.test(trimmed)) return true;
+    const t = s.trim();
+    if (!t) return true;
+    if (MARKER_TOKENS.has(t.toUpperCase())) return true;
+    if (t.length === 1) return true;
+    if (t.length <= 3 && /^[A-Z0-9]+$/.test(t) && !/[AEIOU]/.test(t)) return true;
     return false;
   };
 
-  // Color / icon names used in legend sections. If a "supplier" cell contains
-  // one of these, it's a legend row, not a real brand row.
   const LEGEND_COLOR_WORDS = new Set([
     'TAUPE', 'CORNFLOWER', 'ORANGE', 'TURQUOISE', 'SALMON', 'GREY', 'GRAY',
     'WHITE', 'GREEN', 'RED', 'BLUE', 'YELLOW', 'PINK', 'PURPLE', 'BLACK',
-    'BROWN', 'BEIGE', 'TEAL', 'MAGENTA', 'CYAN', 'GOLD', 'SILVER',
+    'BROWN', 'BEIGE', 'TEAL', 'MAGENTA', 'CYAN', 'GOLD', 'SILVER', 'LAVENDER',
+    'SLATE', 'NAVY', 'OLIVE', 'MAROON', 'IVORY', 'CHARCOAL', 'MINT', 'PEACH',
     'COLOR / ICON', 'COLOR/ICON', 'COLOR', 'ICON',
   ]);
-  const looksLikeLegendSupplier = (s) => {
-    return LEGEND_COLOR_WORDS.has(s.trim().toUpperCase());
+  const looksLikeLegendSupplier = (s) =>
+    LEGEND_COLOR_WORDS.has(s.trim().toUpperCase());
+
+  // "VODKA - 11" -> "Vodka".  "WHITE WINE (750 mL) - 6" -> "White Wine".
+  // "TEQUILA / MEZCAL - 14" -> "Tequila / Mezcal".  Drops the count suffix,
+  // the volume parenthetical, and any trailing asterisk.
+  const cleanCategoryLabel = (raw) => {
+    let t = String(raw || '').trim();
+    if (!t) return '';
+    t = t.replace(/\s*-\s*\d+\s*$/, '');
+    t = t.replace(/\s*\([^)]*\)\s*/g, ' ');
+    t = t.replace(/\*/g, '').replace(/\s+/g, ' ').trim();
+    if (!t || t.toUpperCase() === 'SUPPLIER') return '';
+    if (t.length > 40) return '';
+    // Title-case the all-caps headers; leave mixed case ("Chardonnay") alone.
+    if (t === t.toUpperCase()) {
+      t = t
+        .toLowerCase()
+        .replace(/(^|[\s/])([a-z])/g, (m, p, ch) => p + ch.toUpperCase());
+    }
+    return t;
   };
 
   for (const sheetName of workbook.SheetNames) {
@@ -3255,88 +3745,104 @@ function parseStructuredXlsxApl(workbook) {
     const maxRow = range.e.r;
     const maxCol = range.e.c;
 
-    // Helper: read a cell's string value (0-indexed row + col)
     const cellAt = (r, c) => {
-      const addr = XLSX.utils.encode_cell({ r, c });
-      const cell = sheet[addr];
+      if (c < 0 || c > maxCol || r < 0 || r > maxRow) return '';
+      const cell = sheet[XLSX.utils.encode_cell({ r, c })];
       if (!cell || cell.v === undefined || cell.v === null) return '';
-      return String(cell.v).trim();
+      return String(cell.v).replace(/\s+/g, ' ').trim();
     };
 
-    // Step 1: find all unique SUPPLIER columns
-    const supplierCols = new Set();
+    // ---- Resolve each zone by walking LEFT from its SUPPLIER anchor. ----
+    //
+    // The old code voted for "leftmost non-empty cell in the zone", where the
+    // zone started just after the PREVIOUS supplier column. For a sheet with
+    // venue-approval columns, that start lands inside the previous zone's
+    // block of X-markers, so the vote elected a marker column as the brand
+    // column. Walking left from SUPPLIER is deterministic and can't drift.
+    const zones = new Map(); // supplierCol -> { brandCol, headerRows:Set }
+
     for (let r = 0; r <= maxRow; r++) {
       for (let c = 0; c <= maxCol; c++) {
-        if (cellAt(r, c).toUpperCase() === 'SUPPLIER') {
-          supplierCols.add(c);
+        if (cellAt(r, c).toUpperCase() !== 'SUPPLIER') continue;
+
+        let brandCol = c - 1;
+        while (brandCol >= 0 && SUB_HEADERS.has(cellAt(r, brandCol).toUpperCase())) {
+          brandCol -= 1;
         }
+        if (brandCol < 0) continue;
+
+        // Remember the STYLE/VARIETAL column too — for BEER and WINE it holds
+        // a far more useful per-row category ("Chardonnay") than the block
+        // header ("WHITE WINE - 6") does.
+        const subCol = c - 1 > brandCol ? c - 1 : -1;
+
+        if (!zones.has(c)) {
+          zones.set(c, { brandCol, subCol, headerRows: new Set() });
+        }
+        const zone = zones.get(c);
+        if (zone.subCol === -1 && subCol !== -1) zone.subCol = subCol;
+        // A repeated header row that omits STYLE must not pull the zone
+        // rightwards onto the sub-header column.
+        zone.brandCol = Math.min(zone.brandCol, brandCol);
+        zone.headerRows.add(r);
       }
     }
-    if (supplierCols.size === 0) continue;
-    const sortedSupCols = Array.from(supplierCols).sort((a, b) => a - b);
 
-    // Step 2: build column zones
-    const zones = [];
-    let prev = -1;
-    for (const sc of sortedSupCols) {
-      zones.push({ start: prev + 1, end: sc, supplierCol: sc });
-      prev = sc;
-    }
+    // ---- Read each zone top to bottom. ----
+    // Categories stack vertically inside one zone (VODKA, then RUM, then
+    // WHISKEY), each re-printing its own header row, so we scan every row and
+    // skip the header rows rather than stopping at the first one.
+    for (const [supplierCol, zone] of zones) {
+      // The category label lives in the brand column OF the header row
+      // ("VODKA - 11" sits directly left of "SUPPLIER"). Because categories
+      // stack down a zone, we track the most recent one as we descend.
+      let currentCategory = '';
 
-    // Step 3: for each zone, vote on the brand column
-    for (const zone of zones) {
-      const votes = {};
-      const headerRows = [];
       for (let r = 0; r <= maxRow; r++) {
-        if (cellAt(r, zone.supplierCol).toUpperCase() === 'SUPPLIER') {
-          headerRows.push(r);
-          for (let c = zone.start; c < zone.end; c++) {
-            if (cellAt(r, c)) {
-              votes[c] = (votes[c] || 0) + 1;
-              break;
-            }
-          }
+        if (zone.headerRows.has(r)) {
+          const label = cleanCategoryLabel(cellAt(r, zone.brandCol));
+          if (label) currentCategory = label;
+          continue;
         }
-      }
-      if (Object.keys(votes).length === 0) continue;
-      // Most votes wins; ties broken leftmost
-      const brandCol = Object.entries(votes)
-        .map(([k, v]) => [Number(k), v])
-        .sort((a, b) => b[1] - a[1] || a[0] - b[0])[0][0];
-      zone.brandCol = brandCol;
-      zone.headerRows = new Set(headerRows);
-    }
 
-    // Step 4: walk data rows for each zone
-    for (const zone of zones) {
-      if (zone.brandCol === undefined) continue;
-      for (let r = 0; r <= maxRow; r++) {
-        if (zone.headerRows.has(r)) continue;
         const brandRaw = cellAt(r, zone.brandCol);
-        const supplierRaw = cellAt(r, zone.supplierCol);
+        const supplierRaw = cellAt(r, supplierCol);
         if (!brandRaw || !supplierRaw) continue;
         if (supplierRaw.toUpperCase() === 'SUPPLIER') continue;
 
-        // Skip junk
         if (brandRaw.toUpperCase().startsWith('LOCATIONS')) continue;
         if (brandRaw.startsWith('*')) continue;
         if (looksLikeCategoryHeader(brandRaw)) continue;
-
-        // Reject brand cells that are actually location-approval markers
-        // ("X", "BS", checkmarks, etc.) rather than real brand names
         if (looksLikeMarker(brandRaw)) continue;
-
-        // Skip suppliers that are clearly punctuation/junk
         if (supplierRaw.length < 2) continue;
-
-        // Reject rows from the legend/color-key section (supplier is a color word)
         if (looksLikeLegendSupplier(supplierRaw)) continue;
 
-        const key = `${brandRaw.toLowerCase()}|${supplierRaw.toLowerCase()}`;
+        // Strip the house-brand dagger so the same brand from two sheets
+        // aggregates into one row.
+        const name = brandRaw.replace(/\s*†\s*/g, ' ').replace(/\s+/g, ' ').trim();
+        if (!name || looksLikeMarker(name)) continue;
+
+        // A brand can legitimately appear twice under one supplier in two
+        // different categories — the OHM APL lists "New Amsterdam" under both
+        // VODKA and GIN, both Gallo. Keying on name+supplier alone deleted the
+        // second one, so the gin never reached the prompt and every menu
+        // mention of it was misfiled as off-APL. Category is part of identity.
+        const subType = zone.subCol >= 0 ? cellAt(r, zone.subCol) : '';
+        const category = subType && !looksLikeMarker(subType)
+          ? cleanCategoryLabel(subType)
+          : currentCategory;
+
+        const key = `${name.toLowerCase()}|${supplierRaw.toLowerCase()}|${String(
+          category
+        ).toLowerCase()}`;
         if (seen.has(key)) continue;
         seen.add(key);
 
-        brands.push({ name: brandRaw, supplier: supplierRaw });
+        brands.push(
+          category
+            ? { name, supplier: supplierRaw, category }
+            : { name, supplier: supplierRaw }
+        );
       }
     }
   }
@@ -3400,7 +3906,7 @@ function buildVenueEmails(results, activeApl) {
       const count = data.count || 0;
       if (!bySupplier[sup]) bySupplier[sup] = [];
       bySupplier[sup].push({
-        brand: brand.trim(),
+        brand: normalizeBrandDisplay(brand),
         count,
         cocktails: data.cocktails || [],
       });
