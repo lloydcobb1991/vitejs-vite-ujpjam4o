@@ -815,6 +815,142 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
     URL.revokeObjectURL(url);
   };
 
+  // ---------------------------------------------------------------------
+  // Detail export: ONE ROW PER IMPRESSION.
+  //
+  // The summary export answers "how many". This answers "where, and in what" —
+  // supplier, property, menu file, brand, the cocktail it appeared in, and
+  // which surface it appeared on. That is the layout the supplier emails are
+  // built from, and it is what a client asks for when they want to check a
+  // number rather than trust it.
+  //
+  // The model tags each mention as "(image)", "(image text)" or "(title)";
+  // an untagged entry is a recipe ingredient and "Spirits List" is a product
+  // list. We split the tag back out into its own column rather than leaving it
+  // glued to the cocktail name.
+  // ---------------------------------------------------------------------
+  const exportDetailCSV = () => {
+    if (!results) return;
+
+    const csvCell = (v) => {
+      const t = String(v ?? '');
+      return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t;
+    };
+
+    const splitSurface = (raw) => {
+      const s = String(raw || '').trim();
+      if (!s) return { context: '', surface: 'Recipe' };
+      if (/^spirits list/i.test(s)) {
+        // "Spirits List (Premium Full Bar)" keeps the bar name as context.
+        const m = s.match(/^spirits list\s*\((.+)\)\s*$/i);
+        return { context: m ? m[1] : 'Spirits List', surface: 'Product list' };
+      }
+      const m = s.match(/^(.*?)\s*\(([^)]*)\)\s*$/);
+      if (!m) return { context: s, surface: 'Recipe' };
+      const tag = m[2].toLowerCase();
+      if (tag === 'image') return { context: m[1], surface: 'In photo' };
+      if (tag === 'image text') return { context: m[1], surface: 'Photo caption' };
+      if (tag === 'title') return { context: m[1], surface: 'Cocktail name' };
+      return { context: s, surface: 'Recipe' };
+    };
+
+    const rows = [
+      [
+        'Supplier',
+        'Location',
+        'Menu file',
+        'Brand',
+        'Category',
+        'Appears in',
+        'Surface',
+        'Impressions',
+      ],
+    ];
+
+    // Category comes from the active APL, matched on the normalised brand key
+    // so "Canyon Road (Chardonnay)" finds its APL row.
+    const categoryByBrand = new Map();
+    for (const b of activeApl.brands || []) {
+      if (!b.category) continue;
+      const k = normalizeBrandKey(b.name);
+      if (!categoryByBrand.has(k)) categoryByBrand.set(k, b.category);
+    }
+    const lookupCategory = (brand) => {
+      const k = normalizeBrandKey(brand);
+      if (categoryByBrand.has(k)) return categoryByBrand.get(k);
+
+      // "New Amsterdam (Gin)" -> try the bare name. Normalise first so the
+      // bracket form is converted to parens before we strip it.
+      const paren = normalizeBrandDisplay(brand);
+      const bare = normalizeBrandKey(paren.replace(/\s*\([^)]*\)\s*$/, ''));
+      if (categoryByBrand.has(bare)) return categoryByBrand.get(bare);
+
+      // The model returns the fuller product name where the APL is terse
+      // ("Jack Daniel's Tennessee Whiskey" vs "Jack Daniel's"), so fall back
+      // to the same token matcher the off-APL check uses.
+      const hit = matchesAplBrand(paren, activeApl.brands || []);
+      return hit?.category || '';
+    };
+
+    results.menuAnalyses.forEach((menu) => {
+      Object.entries(menu.brand_impressions || {}).forEach(([brand, data]) => {
+        const supplier = data.supplier || 'UNKNOWN';
+        const display = normalizeBrandDisplay(brand);
+        const category = lookupCategory(brand);
+        const contexts = Array.isArray(data.cocktails) ? data.cocktails : [];
+
+        if (contexts.length === 0) {
+          // No context returned — still record the count so the detail rows
+          // reconcile against the summary export.
+          rows.push([
+            supplier,
+            menu.location,
+            menu.filename,
+            display,
+            category,
+            '',
+            'Unspecified',
+            data.count || 0,
+          ]);
+          return;
+        }
+
+        contexts.forEach((raw) => {
+          const { context, surface } = splitSurface(raw);
+          rows.push([
+            supplier,
+            menu.location,
+            menu.filename,
+            display,
+            category,
+            context,
+            surface,
+            1,
+          ]);
+        });
+      });
+    });
+
+    // Supplier, then location, then brand — the order someone reads it in.
+    const body = rows.slice(1).sort((a, b) =>
+      String(a[0]).localeCompare(String(b[0])) ||
+      String(a[1]).localeCompare(String(b[1])) ||
+      String(a[3]).localeCompare(String(b[3]))
+    );
+
+    const csv = [rows[0], ...body]
+      .map((row) => row.map((cell) => csvCell(cell)).join(','))
+      .join('\n');
+
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `firewatch-detail-${new Date().toISOString().split('T')[0]}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   // ----- Rendering -------------------------------------------------------
 
   return (
@@ -871,6 +1007,7 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
             setView('upload');
           }}
           onExport={exportToCSV}
+          onExportDetail={exportDetailCSV}
           onOpenEmail={() => setView('email')}
         />
       )}
@@ -1633,7 +1770,7 @@ function cleanIssueContext(raw) {
 // Results view
 // ===========================================================================
 
-function ResultsView({ results, activeApl, onNew, onExport, onOpenEmail }) {
+function ResultsView({ results, activeApl, onNew, onExport, onExportDetail, onOpenEmail }) {
   const [newsStatus, setNewsStatus] = useState('idle'); // idle|loading|done|error
   const [news, setNews] = useState(null);
   const [newsError, setNewsError] = useState(null);
@@ -1883,6 +2020,7 @@ function ResultsView({ results, activeApl, onNew, onExport, onOpenEmail }) {
           </button>
           <button
             onClick={onExport}
+            title="Summary: one row per brand, one column per location"
             style={{
               background: 'white',
               color: '#da291c',
@@ -1901,7 +2039,30 @@ function ResultsView({ results, activeApl, onNew, onExport, onOpenEmail }) {
             }}
           >
             <Download size={18} />
-            Export CSV
+            Summary CSV
+          </button>
+          <button
+            onClick={onExportDetail}
+            title="Detail: one row per impression — supplier, location, menu, brand, cocktail, surface"
+            style={{
+              background: 'white',
+              color: '#da291c',
+              border: 'none',
+              padding: '16px 32px',
+              borderRadius: '10px',
+              fontSize: '16px',
+              fontWeight: '800',
+              cursor: 'pointer',
+              textTransform: 'uppercase',
+              letterSpacing: '1px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              boxShadow: '0 8px 24px rgba(0,0,0,0.2)',
+            }}
+          >
+            <Download size={18} />
+            Detail CSV
           </button>
         </div>
       </div>
