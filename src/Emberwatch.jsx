@@ -837,20 +837,41 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
       return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t;
     };
 
+    // The model writes these tags itself, so they arrive with typos and
+    // variations — "Sprits list", "Spirits Menu", "(img)". Matching the exact
+    // string sent those rows to the default bucket, which mislabels a product
+    // listing as a recipe ingredient. Match loosely instead.
+    const PRODUCT_LIST_RE =
+      /^\s*(sp[ir]{1,3}ts?|spirit|liquor|wine|beer|bottle|draft|drink|product|mixer|well)\s*(list|menu|selection|offerings)?\b/i;
+
+    const surfaceForTag = (tag) => {
+      const t = String(tag || '').toLowerCase().replace(/[^a-z ]/g, '').trim();
+      if (!t) return null;
+      if (/^im?ages?$/.test(t) || t === 'img' || t === 'photo') return 'In photo';
+      if (t.startsWith('image text') || t === 'caption' || t === 'photo text')
+        return 'Photo caption';
+      if (t === 'title' || t === 'name' || t === 'cocktail title')
+        return 'Cocktail name';
+      return null;
+    };
+
     const splitSurface = (raw) => {
       const s = String(raw || '').trim();
       if (!s) return { context: '', surface: 'Recipe' };
-      if (/^spirits list/i.test(s)) {
+
+      if (PRODUCT_LIST_RE.test(s)) {
         // "Spirits List (Premium Full Bar)" keeps the bar name as context.
-        const m = s.match(/^spirits list\s*\((.+)\)\s*$/i);
-        return { context: m ? m[1] : 'Spirits List', surface: 'Product list' };
+        const m = s.match(/^[^(]*\((.+)\)\s*$/);
+        return { context: m ? m[1].trim() : s, surface: 'Product list' };
       }
+
       const m = s.match(/^(.*?)\s*\(([^)]*)\)\s*$/);
       if (!m) return { context: s, surface: 'Recipe' };
-      const tag = m[2].toLowerCase();
-      if (tag === 'image') return { context: m[1], surface: 'In photo' };
-      if (tag === 'image text') return { context: m[1], surface: 'Photo caption' };
-      if (tag === 'title') return { context: m[1], surface: 'Cocktail name' };
+
+      const mapped = surfaceForTag(m[2]);
+      if (mapped) return { context: m[1].trim(), surface: mapped };
+
+      // An unrecognised parenthetical is part of the drink name, not a tag.
       return { context: s, surface: 'Recipe' };
     };
 
@@ -931,6 +952,22 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
       });
     });
 
+    // Reconcile against the summary before handing the file over. Detail rows
+    // must sum to the same impression total; if they don't, something is being
+    // dropped or emitted twice, and a supplier is the wrong person to find
+    // that out. Non-blocking — the file still downloads, with the discrepancy
+    // recorded in the file itself.
+    const detailTotal = rows
+      .slice(1)
+      .reduce((n, r) => n + (Number(r[7]) || 0), 0);
+    const summaryTotal = results.aggregated.reduce((n, sup) => n + sup.total, 0);
+    const reconciled = detailTotal === summaryTotal;
+    if (!reconciled) {
+      console.warn(
+        `Detail export mismatch: ${detailTotal} detail rows vs ${summaryTotal} summary impressions`
+      );
+    }
+
     // Supplier, then location, then brand — the order someone reads it in.
     const body = rows.slice(1).sort((a, b) =>
       String(a[0]).localeCompare(String(b[0])) ||
@@ -938,7 +975,16 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
       String(a[3]).localeCompare(String(b[3]))
     );
 
-    const csv = [rows[0], ...body]
+    const footer = [
+      [],
+      [
+        reconciled
+          ? `Reconciled: ${detailTotal} impressions, matching the summary export.`
+          : `WARNING: ${detailTotal} impressions listed here vs ${summaryTotal} in the summary export. Do not send until this is resolved.`,
+      ],
+    ];
+
+    const csv = [rows[0], ...body, ...footer]
       .map((row) => row.map((cell) => csvCell(cell)).join(','))
       .join('\n');
 
