@@ -153,7 +153,6 @@ export default function Emberwatch() {
   const [progress, setProgress] = useState('');
   const [view, setView] = useState('upload'); // 'upload' | 'results' | 'email'
   const [customApl, setCustomApl] = useState(null); // { name, brands } or null
-  const [fileLabels, setFileLabels] = useState({}); // filename -> group label
   const [aplError, setAplError] = useState(null);
   const aplInputRef = useRef(null);
 
@@ -164,29 +163,6 @@ export default function Emberwatch() {
     setUploadedFiles(files);
     setResults(null);
     setError(null);
-    // Seed a default label for anything new, without clobbering labels the
-    // user has already edited for files that are still in the list.
-    setFileLabels((prev) => {
-      const next = {};
-      for (const f of files) {
-        next[f.name] = prev[f.name] ?? defaultLabelFromFilename(f.name);
-      }
-      return next;
-    });
-  };
-
-  const setFileLabel = (filename, value) => {
-    setFileLabels((prev) => ({ ...prev, [filename]: value }));
-  };
-
-  // Apply one label to every uploaded file — the common case when a whole
-  // batch belongs to a single property.
-  const setAllFileLabels = (value) => {
-    setFileLabels(() => {
-      const next = {};
-      for (const f of uploadedFiles) next[f.name] = value;
-      return next;
-    });
   };
 
   // ----- Custom APL upload -----
@@ -692,11 +668,7 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
   // deliberately free text: reports go out per property most of the time, but
   // sometimes per region, so hard-coding a hierarchy would be wrong by
   // next quarter.
-  const resolveLocation = (filename) => {
-    const typed = fileLabels[filename];
-    if (typed && typed.trim()) return typed.trim();
-    return defaultLabelFromFilename(filename);
-  };
+  const resolveLocation = (filename) => defaultLabelFromFilename(filename);
 
   const aggregateBySupplier = (menuAnalyses) => {
     const supplierTotals = {};
@@ -707,7 +679,10 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
     menuAnalyses.forEach((menu) => {
       Object.entries(menu.brand_impressions || {}).forEach(([brand, data]) => {
         const supplier = data.supplier || 'UNKNOWN';
-        const brandKey = normalizeBrandKey(brand);
+        // Resolve to the APL's own name first, so "Jameson Irish" and
+        // "Jameson" land in one row instead of splitting the supplier's count.
+        const canonical = canonicalizeBrand(brand, activeApl.brands);
+        const brandKey = normalizeBrandKey(canonical);
 
         if (!supplierTotals[supplier]) {
           supplierTotals[supplier] = { total: 0, brands: {}, locations: {} };
@@ -716,7 +691,7 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
 
         // Pick display name: first one we see for this normalized key
         if (!canonicalDisplayName[supplier][brandKey]) {
-          canonicalDisplayName[supplier][brandKey] = normalizeBrandDisplay(brand);
+          canonicalDisplayName[supplier][brandKey] = normalizeBrandDisplay(canonical);
         }
         const displayName = canonicalDisplayName[supplier][brandKey];
 
@@ -739,10 +714,12 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
     if (!menu || !menu.brand_impressions) return 0;
     // Sum rather than return-first: one menu can carry both "Brand (Gin)" and
     // "Brand [Gin]" if the model wavered mid-response, and both belong here.
-    const target = normalizeBrandKey(brandName);
+    const target = normalizeBrandKey(
+      canonicalizeBrand(brandName, activeApl.brands)
+    );
     let total = 0;
     for (const [name, data] of Object.entries(menu.brand_impressions)) {
-      if (normalizeBrandKey(name) === target) {
+      if (normalizeBrandKey(canonicalizeBrand(name, activeApl.brands)) === target) {
         total += data.count || 0;
       }
     }
@@ -916,8 +893,9 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
     results.menuAnalyses.forEach((menu) => {
       Object.entries(menu.brand_impressions || {}).forEach(([brand, data]) => {
         const supplier = data.supplier || 'UNKNOWN';
-        const display = normalizeBrandDisplay(brand);
-        const category = lookupCategory(brand);
+        const canonical = canonicalizeBrand(brand, activeApl.brands);
+        const display = normalizeBrandDisplay(canonical);
+        const category = lookupCategory(canonical);
         const contexts = Array.isArray(data.cocktails) ? data.cocktails : [];
 
         if (contexts.length === 0) {
@@ -1035,10 +1013,6 @@ ONLY respond with JSON. Do not include a "cocktails" array or "recipe_text" anyw
           onAplDrop={handleAplDrop}
           onClearApl={clearCustomApl}
           onFilesChange={handleFilesChange}
-          fileLabels={fileLabels}
-          onFileLabelChange={setFileLabel}
-          onApplyLabelToAll={setAllFileLabels}
-          defaultLabelFor={defaultLabelFromFilename}
           onAnalyze={analyzeMenus}
         />
       )}
@@ -1087,10 +1061,6 @@ function UploadView({
   onAplDrop,
   onClearApl,
   onFilesChange,
-  fileLabels,
-  onFileLabelChange,
-  onApplyLabelToAll,
-  defaultLabelFor,
   onAnalyze,
 }) {
   // Local drag state so the APL card can highlight while a file is being
@@ -1301,171 +1271,6 @@ function UploadView({
           onFilesChange={onFilesChange}
           disabled={analyzing}
         />
-
-        {uploadedFiles.length > 0 && (
-          <div
-            style={{
-              margin: '28px 0 8px',
-              padding: '24px 28px',
-              background: '#fafafa',
-              border: '2px solid #ececec',
-              borderRadius: '12px',
-            }}
-          >
-            <div
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'flex-end',
-                flexWrap: 'wrap',
-                gap: '12px',
-                marginBottom: '6px',
-              }}
-            >
-              <div>
-                <div
-                  style={{
-                    fontSize: '11px',
-                    fontWeight: '800',
-                    color: '#999',
-                    letterSpacing: '2px',
-                    textTransform: 'uppercase',
-                  }}
-                >
-                  Report Grouping
-                </div>
-                <div
-                  style={{
-                    fontSize: '13px',
-                    color: '#666',
-                    marginTop: '4px',
-                    fontWeight: '500',
-                    lineHeight: '1.6',
-                    maxWidth: '640px',
-                  }}
-                >
-                  These become the columns in the export and one email per
-                  group. Give several menus the same label to roll them up —
-                  a property with a lunch menu, a drinks menu and a banquet
-                  playbook is still one property.
-                </div>
-              </div>
-              <button
-                onClick={() => {
-                  const first = uploadedFiles[0];
-                  const seed =
-                    (first && fileLabels[first.name]) ||
-                    (first && defaultLabelFor(first.name)) ||
-                    '';
-                  const value = window.prompt(
-                    'Label every uploaded menu as:',
-                    seed
-                  );
-                  if (value !== null && value.trim()) {
-                    onApplyLabelToAll(value.trim());
-                  }
-                }}
-                disabled={analyzing}
-                style={{
-                  background: 'white',
-                  color: '#da291c',
-                  border: '2px solid #da291c',
-                  padding: '10px 18px',
-                  borderRadius: '8px',
-                  fontSize: '12px',
-                  fontWeight: '800',
-                  cursor: analyzing ? 'not-allowed' : 'pointer',
-                  textTransform: 'uppercase',
-                  letterSpacing: '1px',
-                  whiteSpace: 'nowrap',
-                }}
-              >
-                Same label for all
-              </button>
-            </div>
-
-            <div
-              style={{
-                display: 'grid',
-                gap: '8px',
-                marginTop: '18px',
-                maxHeight: '340px',
-                overflowY: 'auto',
-                overflowX: 'hidden',
-              }}
-            >
-              {uploadedFiles.map((f) => (
-                <div
-                  key={f.name}
-                  style={{
-                    display: 'grid',
-                    gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)',
-                    gap: '12px',
-                    alignItems: 'center',
-                  }}
-                >
-                  <div
-                    title={f.name}
-                    style={{
-                      fontSize: '13px',
-                      color: '#888',
-                      fontWeight: '600',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                    }}
-                  >
-                    {f.name}
-                  </div>
-                  <input
-                    type="text"
-                    value={fileLabels[f.name] ?? ''}
-                    disabled={analyzing}
-                    placeholder={defaultLabelFor(f.name)}
-                    onChange={(e) => onFileLabelChange(f.name, e.target.value)}
-                    style={{
-                      width: '100%',
-                      padding: '9px 12px',
-                      fontSize: '14px',
-                      border: '2px solid #ddd',
-                      borderRadius: '8px',
-                      fontWeight: '700',
-                      color: '#1a1a1a',
-                      background: 'white',
-                    }}
-                  />
-                </div>
-              ))}
-            </div>
-
-            <div
-              style={{
-                marginTop: '14px',
-                fontSize: '12px',
-                color: '#999',
-                fontWeight: '600',
-              }}
-            >
-              {new Set(
-                uploadedFiles.map(
-                  (f) =>
-                    (fileLabels[f.name] || '').trim() || defaultLabelFor(f.name)
-                )
-              ).size}{' '}
-              group
-              {new Set(
-                uploadedFiles.map(
-                  (f) =>
-                    (fileLabels[f.name] || '').trim() || defaultLabelFor(f.name)
-                )
-              ).size === 1
-                ? ''
-                : 's'}{' '}
-              across {uploadedFiles.length} menu
-              {uploadedFiles.length === 1 ? '' : 's'}
-            </div>
-          </div>
-        )}
 
         <button
           onClick={onAnalyze}
@@ -2829,7 +2634,7 @@ function ResultsView({ results, activeApl, onNew, onExport, onExportDetail, onOp
 
 function EmailReportView({ results, activeApl, onBack }) {
   const [emails, setEmails] = useState(() =>
-    buildVenueEmails(results, activeApl)
+    buildSupplierEmails(results, activeApl)
   );
   const [currentIdx, setCurrentIdx] = useState(0);
   const [editing, setEditing] = useState(false);
@@ -2933,7 +2738,7 @@ function EmailReportView({ results, activeApl, onBack }) {
     const blank = batch.filter((e) => e.to.length === 0);
     if (blank.length) {
       setSendError(
-        `${blank.length} venue${
+        `${blank.length} supplier${
           blank.length > 1 ? 's have' : ' has'
         } no recipients: ${blank.map((e) => e.location).join(', ')}`
       );
@@ -3180,7 +2985,7 @@ function EmailReportView({ results, activeApl, onBack }) {
               fontWeight: '600',
             }}
           >
-            {emails.length} venue report{emails.length === 1 ? '' : 's'} ·
+            {emails.length} supplier report{emails.length === 1 ? '' : 's'} ·
             review each before sending
           </p>
         </div>
@@ -3324,7 +3129,7 @@ function EmailReportView({ results, activeApl, onBack }) {
               margin: '0 0 16px 0',
             }}
           >
-            Venues ({emails.length})
+            Suppliers ({emails.length})
           </h3>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
             {emails.map((e, idx) => {
@@ -3364,7 +3169,8 @@ function EmailReportView({ results, activeApl, onBack }) {
                       marginTop: '4px',
                     }}
                   >
-                    {e.totalImpressions} impressions ·{' '}
+                    {e.totalImpressions} impressions · {e.brandCount} brand
+                    {e.brandCount === 1 ? '' : 's'} ·{' '}
                     {noRecipients ? (
                       <span style={{ color: active ? '#fff3d6' : '#b26a00' }}>
                         no recipients
@@ -3425,9 +3231,9 @@ function EmailReportView({ results, activeApl, onBack }) {
                 }}
               >
                 {current.totalImpressions} impressions · {current.brandCount}{' '}
-                brands · {current.issueCount} naming note
-                {current.issueCount === 1 ? '' : 's'} · {current.offAplCount}{' '}
-                off-APL
+                brand{current.brandCount === 1 ? '' : 's'} ·{' '}
+                {current.supplierCount} propert
+                {current.supplierCount === 1 ? 'y' : 'ies'}
               </div>
             </div>
             <button
@@ -3966,6 +3772,71 @@ function matchesAplBrand(offName, aplBrands) {
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Canonical brand names.
+//
+// The model is told to key each brand by its APL form, and mostly it does —
+// but a 36-menu run produced "Jameson" and "Jameson Irish" as separate brands
+// for the same product, plus "Coffee" alongside "Coffee (LA COLOMBE)". Every
+// split understates a supplier's own count on their own report.
+//
+// The fix has to be careful, because not every near-match is a duplicate: the
+// Alterra APL lists BOTH "Woodford Reserve" and "Woodford Reserve Rye", which
+// are different products. So the APL decides, not string similarity.
+//
+//   1. An APL entry with the SAME number of meaningful tokens wins outright.
+//      "Woodford Reserve Rye" finds its own entry and stays distinct.
+//   2. Otherwise, the longest APL entry that is a strict prefix of the
+//      reported name. "Jameson Irish" finds "Jameson (Irish)".
+//   3. If either step is ambiguous, leave the reported name alone. "New
+//      Amsterdam (Gin)" matches two APL rows, so it keeps its category tag.
+// ---------------------------------------------------------------------------
+
+function canonicalizeBrand(reported, aplBrands) {
+  const raw = String(reported || '').trim();
+  if (!raw || !aplBrands || aplBrands.length === 0) return raw;
+
+  const tokens = offAplTokens(raw);
+  if (tokens.length === 0) return raw;
+
+  const prefixMatches = (aplTokens) => {
+    if (aplTokens.length > tokens.length) return false;
+    for (let i = 0; i < aplTokens.length; i++) {
+      if (!tokensMatch(tokens[i], aplTokens[i])) return false;
+    }
+    return true;
+  };
+
+  const sameLength = [];
+  const shorter = [];
+  for (const b of aplBrands) {
+    const aplTokens = offAplTokens(b.name);
+    if (aplTokens.length === 0) continue;
+    if (!prefixMatches(aplTokens)) continue;
+    (aplTokens.length === tokens.length ? sameLength : shorter).push({
+      brand: b,
+      len: aplTokens.length,
+    });
+  }
+
+  // Display form drops any trailing region/style parenthetical, matching the
+  // naming rule the prompt already gives the model: "Jameson (Irish)" reads
+  // as "Jameson".
+  const display = (b) =>
+    String(b.name).replace(/\s*\([^)]*\)\s*$/, '').trim() || String(b.name);
+
+  if (sameLength.length === 1) return display(sameLength[0].brand);
+  if (sameLength.length > 1) return raw; // ambiguous — leave it alone
+
+  if (shorter.length) {
+    const longest = Math.max(...shorter.map((x) => x.len));
+    const best = shorter.filter((x) => x.len === longest);
+    if (best.length === 1) return display(best[0].brand);
+  }
+
+  return raw;
+}
+
 function aggregateOffApl(menuAnalyses, activeApl) {
   const map = {}; // lowercased name -> { name, category, locations:{loc:count}, total }
 
@@ -4316,6 +4187,250 @@ function parseStructuredXlsxApl(workbook) {
 // than around who supplies it.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Program boilerplate. Everything here is the same for every supplier on a
+// program and is edited once, not derived from the menus. Kept as a single
+// object so it can move to a settings panel (or a database row) later without
+// touching the generator.
+// ---------------------------------------------------------------------------
+
+const PROGRAM_DEFAULTS = {
+  clientName: 'Alterra Mountain Company',
+  agency: 'Ignite Creative Services (ICS)',
+  seasonLabel: 'Seasonal Launch beginning September 2025 – July 2026',
+  menusReviewed: '2,500+',
+  outletCount: '150+',
+  menusPrinted: '45,500+',
+  digitalMedia: [
+    'Product Education Seminars',
+    'Digital and On-Site Posters',
+    'Web Images',
+    'System-Wide Email Blasts, Blog & Newsletters',
+    'Videography',
+    'Social Media Posts',
+    'News & Press Coverage',
+  ],
+  participationCost: '',      // left blank on purpose — see note below
+  approvalDeadline: '',
+};
+
+// ---------------------------------------------------------------------------
+// Build one email per SUPPLIER.
+//
+// Replaces the per-venue report. The recipient is the person who pays, so the
+// document is organised around what THEY are getting: how much, where, and in
+// what. It follows the structure of the emails ICS already sends by hand,
+// with the parts that were previously typed from memory now generated.
+//
+// Deliberately NOT generated: the participation cost. It comes from a reach
+// multiplier nobody at ICS can currently explain, so it stays an editable
+// field rather than a number the tool invents.
+// ---------------------------------------------------------------------------
+
+function buildSupplierEmails(results, activeApl, program = PROGRAM_DEFAULTS) {
+  const period = new Date().toLocaleDateString('en-US', {
+    month: 'long',
+    year: 'numeric',
+  });
+  const stamp = new Date().toLocaleDateString();
+  const apl = activeApl?.brands || [];
+
+  // supplier -> brand -> { total, category, byLocation }
+  const suppliers = {};
+
+  results.menuAnalyses.forEach((menu) => {
+    Object.entries(menu.brand_impressions || {}).forEach(([rawBrand, data]) => {
+      const supplier = String(data.supplier || 'UNKNOWN').trim();
+      const brand = normalizeBrandDisplay(canonicalizeBrand(rawBrand, apl));
+      const count = data.count || 0;
+      if (!count) return;
+
+      if (!suppliers[supplier]) suppliers[supplier] = { brands: {}, total: 0 };
+      const bucket = suppliers[supplier];
+      if (!bucket.brands[brand]) {
+        const hit = matchesAplBrand(brand, apl);
+        bucket.brands[brand] = {
+          total: 0,
+          category: hit?.category || '',
+          byLocation: {},
+        };
+      }
+      const b = bucket.brands[brand];
+      b.total += count;
+      bucket.total += count;
+
+      if (!b.byLocation[menu.location]) {
+        b.byLocation[menu.location] = { cocktails: [], listings: 0 };
+      }
+      const loc = b.byLocation[menu.location];
+
+      // Split named drinks from product-list placements. The old emails only
+      // ever showed cocktails, which hid roughly half of what a supplier was
+      // paying for — 201 of 434 impressions in the first real Alterra run.
+      const contexts = Array.isArray(data.cocktails) ? data.cocktails : [];
+      if (contexts.length === 0) {
+        loc.listings += count;
+        return;
+      }
+      contexts.forEach((raw) => {
+        const t = String(raw || '').trim();
+        if (!t) return;
+        if (/^\s*(sp[ir]{1,3}ts?|spirit|liquor|wine|beer|bottle|draft|drink|product|mixer|well)\s*(list|menu|selection|offerings)?\b/i.test(t)) {
+          loc.listings += 1;
+          return;
+        }
+        // Drop the surface tag. The model does not always keep it terse — real
+        // output includes "(title — Laybacks Bar cocktail)" and "(recipe
+        // ingredient — Laybacks Bar)" — so match a trailing parenthetical that
+        // BEGINS with a tag word rather than one that equals it exactly.
+        // Without this the same drink appears twice under one brand.
+        const name = t
+          .replace(
+            /\s*\((image|image text|title|img|photo|caption|recipe|recipe ingredient|ingredient)\b[^)]*\)\s*$/i,
+            ''
+          )
+          .trim();
+        if (name && !loc.cocktails.includes(name)) loc.cocktails.push(name);
+      });
+    });
+  });
+
+  return Object.entries(suppliers)
+    .sort((a, b) => b[1].total - a[1].total)
+    .map(([supplier, bucket]) => {
+      const brandRows = Object.entries(bucket.brands).sort(
+        (a, b) => b[1].total - a[1].total || a[0].localeCompare(b[0])
+      );
+
+      const allLocations = [
+        ...new Set(
+          brandRows.flatMap(([, b]) => Object.keys(b.byLocation))
+        ),
+      ].sort();
+
+      // --- Placement summary: the numbers the old email never carried ---
+      const summaryRows = brandRows
+        .map(([name, b]) => {
+          const locs = Object.keys(b.byLocation).sort().join(', ');
+          return `  ${name} — ${b.total} impression${b.total === 1 ? '' : 's'}\n      ${locs}`;
+        })
+        .join('\n');
+
+      // --- APL products, grouped by the APL's own categories ---
+      const byCategory = {};
+      brandRows.forEach(([name, b]) => {
+        const c = b.category || 'Other';
+        (byCategory[c] = byCategory[c] || []).push(name);
+      });
+      const aplBlock = Object.keys(byCategory)
+        .sort()
+        .map((c) => `  ${c.toUpperCase()}: ${byCategory[c].sort().join(', ')}`)
+        .join('\n');
+
+      // --- Cocktail listings, by property, as in the existing emails ---
+      const cocktailByLocation = {};
+      brandRows.forEach(([name, b]) => {
+        Object.entries(b.byLocation).forEach(([loc, v]) => {
+          if (!v.cocktails.length) return;
+          (cocktailByLocation[loc] = cocktailByLocation[loc] || []).push(
+            `    ${name} — ${v.cocktails.join(', ')}`
+          );
+        });
+      });
+      const cocktailBlock = Object.keys(cocktailByLocation).length
+        ? Object.keys(cocktailByLocation)
+            .sort()
+            .map((loc) => `  ${loc.toUpperCase()}:\n${cocktailByLocation[loc].join('\n')}`)
+            .join('\n')
+        : '  No named cocktail listings on the menus reviewed this period.';
+
+      // --- Product-list placements: new, and roughly half the value ---
+      const listingByLocation = {};
+      brandRows.forEach(([name, b]) => {
+        Object.entries(b.byLocation).forEach(([loc, v]) => {
+          if (!v.listings) return;
+          (listingByLocation[loc] = listingByLocation[loc] || []).push(
+            `    ${name} — ${v.listings} placement${v.listings === 1 ? '' : 's'}`
+          );
+        });
+      });
+      const listingBlock = Object.keys(listingByLocation).length
+        ? `\n\nALSO ON PRINTED BAR, DRAFT AND BOTTLE LISTS
+Placements outside named cocktails — well lists, draft boards, bottle menus:
+${Object.keys(listingByLocation)
+  .sort()
+  .map((loc) => `  ${loc.toUpperCase()}:\n${listingByLocation[loc].join('\n')}`)
+  .join('\n')}`
+        : '';
+
+      const costBlock = program.participationCost
+        ? `\n\nPARTICIPATION COST: ${program.participationCost}\n(Invoice provided by ${program.agency}.)`
+        : `\n\nPARTICIPATION COST: [add before sending]\n(Invoice provided by ${program.agency}.)`;
+
+      const deadlineBlock = program.approvalDeadline
+        ? `\n\nPlease confirm approval by ${program.approvalDeadline}.`
+        : '\n\nPlease confirm approval by [add date].';
+
+      const body = `Hello,
+
+${program.agency} is pleased to share your brand placement across ${program.clientName} for the current beverage menu program. We reviewed ${program.menusReviewed} menus across ${program.outletCount} outlets as part of this exercise.
+
+Program Timeline:
+  ${program.seasonLabel}
+
+SUPPLIER: ${supplier.toUpperCase()}
+
+YOUR PLACEMENT
+  ${bucket.total} total impression${bucket.total === 1 ? '' : 's'}
+  ${brandRows.length} brand${brandRows.length === 1 ? '' : 's'} across ${allLocations.length} propert${allLocations.length === 1 ? 'y' : 'ies'}
+
+${summaryRows}
+
+APL / SKU FOCUS & PRODUCT LISTINGS
+${aplBlock}
+
+COCKTAIL MENU LISTINGS
+${cocktailBlock}${listingBlock}
+
+PROPERTIES IN THIS PROGRAM
+  ${allLocations.join(', ')}
+
+KEY FEATURES
+  ${program.outletCount} outlets · ${program.menusPrinted} menus printed
+  Educational product launch materials and playbooks
+
+DIGITAL MEDIA INTEGRATION
+${program.digitalMedia.map((d) => `  ${d}`).join('\n')}${costBlock}${deadlineBlock}
+
+If ${program.clientName} is not a national account for your company, please let us know the correct contacts for each region.
+
+We look forward to your participation and Igniting Results together.
+
+Best regards,
+The Ignite Team
+
+--
+Generated by Fire Watch - Ignite Creative Services LLC - ${stamp}
+Every appearance of an APL brand counts as one impression: recipe ingredients,
+printed product lists, cocktail names, and brands visible in menu photography
+are each counted separately.`;
+
+      return {
+        location: supplier, // the review UI keys on this field
+        supplier,
+        filename: '',
+        to: [],
+        subject: `${program.clientName} Beverage Menu Program - ${supplier} - ${period}`,
+        body,
+        totalImpressions: bucket.total,
+        brandCount: brandRows.length,
+        supplierCount: allLocations.length,
+        issueCount: 0,
+        offAplCount: 0,
+      };
+    });
+}
+
 function buildVenueEmails(results, activeApl) {
   const period = new Date().toLocaleDateString('en-US', {
     month: 'long',
@@ -4357,7 +4472,9 @@ function buildVenueEmails(results, activeApl) {
       const count = data.count || 0;
       if (!bySupplier[sup]) bySupplier[sup] = [];
       bySupplier[sup].push({
-        brand: normalizeBrandDisplay(brand),
+        brand: normalizeBrandDisplay(
+          canonicalizeBrand(brand, activeApl?.brands || [])
+        ),
         count,
         cocktails: data.cocktails || [],
       });
