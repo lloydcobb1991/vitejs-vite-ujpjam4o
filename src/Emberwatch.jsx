@@ -180,22 +180,15 @@ export default function Emberwatch() {
       let brands;
 
       if (ext === 'xlsx' || ext === 'xls') {
-        // Parse Excel via SheetJS. Try a flat parse on sheet 1 first (handles
-        // simple "Brand Name | Supplier" spreadsheets). If that fails, fall
-        // back to the structured parser that walks multi-block layouts across
-        // every sheet.
+        // Both parsers, every sheet, union of the results. The old code ran a
+        // flat parse on sheet ONE and, if it succeeded, never called the
+        // structured parser at all — so a workbook whose first tab happened to
+        // carry "Brand"/"Supplier" headers silently loaded that one tab and
+        // discarded every other tab in the file. Nothing surfaced; the brand
+        // count just looked plausible.
         const arrayBuffer = await file.arrayBuffer();
         const workbook = XLSX.read(arrayBuffer, { type: 'array' });
-
-        try {
-          const sheetName = workbook.SheetNames[0];
-          const worksheet = workbook.Sheets[sheetName];
-          const rows = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
-          brands = parseAplRows(rows);
-        } catch (flatErr) {
-          // Flat parse couldn't find headers — try structured parsing
-          brands = parseStructuredXlsxApl(workbook);
-        }
+        brands = parseXlsxApl(workbook);
       } else if (ext === 'csv') {
         // CSV path
         const text = await file.text();
@@ -502,12 +495,23 @@ When an APL brand is mentioned on the menu but the rendering is genuinely proble
 
 - **Incomplete brand names that are ambiguous or undersell the brand.** Examples:
   - Menu says "Jack" or "Jack Daniel's" → APL has "Jack Daniel's Tennessee Whiskey". Flag — the menu should include the full product name.
-  - Menu says "Absolut Vodka" → APL has "Absolut". Flag if the menu adds a generic descriptor that's not part of the official brand name, OR omits the variant (e.g., menu says "Absolut" generically when the APL distinguishes Absolut/Absolut Citron/Absolut Elyx).
+  - Menu says "Absolut" with no variant while the APL distinguishes Absolut / Absolut Citron / Absolut Elyx → flag that the menu doesn't say which product. This is the ONLY Absolut case that gets flagged.
   - Menu says "Crown" or "Crown Royal" → APL has "Crown Royal Canadian Whisky". Flag — too generic to identify the SKU.
   - Menu says "Jim" or "Jim Beam" → APL has "Jim Beam Bourbon". Flag — missing the product specifier.
 - **Misspellings of brand names.** "Bacardy" instead of "Bacardi", "Hennesy" instead of "Hennessy", etc.
 - **Wrong product variants** — menu lists one variant in the ingredients but the recipe context suggests another (e.g., menu says "Don Julio Blanco" in a recipe that would typically use Reposado). Flag for review.
 - **Inconsistent renderings of the same brand within one menu** — if the same APL brand appears two different ways on the same menu (e.g., "Tito's Handmade" in one recipe and just "Tito's Vodka" in another), flag the inconsistency.
+
+**ONLY FLAG WHEN THE MENU IS LESS SPECIFIC THAN THE APL.**
+A menu name that is MORE specific than the APL entry is never a naming fault.
+If the menu says "Absolut Vanilla" and the APL lists "Absolut", that is a
+different product, not a misspelling. Do not flag it and do not suggest
+shortening it — either it is on the APL as its own line, in which case count
+it, or it is absent from the APL, in which case it goes in off_apl_brands.
+The same applies to every flavour, age and expression variant: "Grey Goose Le
+Citron", "Milagro Reposado", "Glenfiddich 18", "Ketel One Peach & Orange
+Blossom". Never emit a compliance issue whose correct_name is simply a
+shortened form of the found_text.
 
 **IMPORTANT — DISTINGUISHING OFF-APL FROM COMPLIANCE ISSUES:**
 - If a brand on the menu is NOT in the APL at all (e.g., menu mentions "Ole Smoky" but Ole Smoky is nowhere in the APL list) → silently ignore. Do not flag.
@@ -521,7 +525,8 @@ In addition to everything above, produce a SEPARATE list of the notable branded 
 Hard rules for this list:
 - These do NOT count as impressions. Do NOT add them to brand_impressions.
 - These are NOT compliance issues. Do NOT add them to compliance_issues.
-- Include only NAMED, branded products — proper-noun spirit/beer/wine/liqueur/RTD brands that are not in the APL. Examples on a typical menu: "Ole Smoky Salty Caramel Whiskey", "Don Julio Reposado", "Skrewball Peanut Butter Whiskey", non-APL Seedlip variants (e.g. "Seedlip Grove 42", "Seedlip Garden 108"), "Bulleit" if absent from the APL, competitor beers/wines by name.
+- Include only NAMED, branded products — proper-noun spirit/beer/wine/liqueur/RTD brands that are not in the APL. Examples on a typical menu: "Ole Smoky Salty Caramel Whiskey", "Don Julio Reposado", "Skrewball Peanut Butter Whiskey", competitor beers/wines by name.
+- Before you put anything in this list, read the APL above again in full, including its non-alcoholic, beer, wine and sparkling entries. A brand belongs here ONLY if it is genuinely absent from that list. Do not decide a brand is off-APL from your own knowledge of what a venue usually carries — the APL above is the only authority.
 - Do NOT include generic ingredients or non-branded items: juices, "simple syrup", "mint", "lime juice", "egg white", "house-made cinnamon syrup", produce, or category words like "vodka" / "tequila". Only real brand names.
 - List each off-APL brand ONCE, with every place it appears collected in "where".
 
@@ -1600,6 +1605,24 @@ function filterIssues(issues, activeApl) {
     if (found.toLowerCase() === correct.toLowerCase()) return false;
     if (found.length > 45) return false;
     if (!isRealAplBrand(correct)) return false;
+
+    // A menu name that is MORE specific than the APL entry is never a naming
+    // fault. "Absolut Vanilla" is a line extension, not a misspelling of
+    // "Absolut" — either it is on the APL as its own line and was counted, or
+    // it is absent from the APL and belongs in the off-APL list. Telling a
+    // client to shorten it is wrong either way.
+    //
+    // Exact token comparison, not fuzzy: "Bacardy" vs "Bacardi" must still
+    // come through as a real misspelling.
+    const foundTokens = offAplTokens(found);
+    const correctTokens = offAplTokens(correct);
+    if (
+      correctTokens.length &&
+      foundTokens.length >= correctTokens.length &&
+      correctTokens.every((t, idx) => t === foundTokens[idx])
+    ) {
+      return false;
+    }
 
     const key = `${found.toLowerCase()}|${correct.toLowerCase()}`;
     if (seenIssue.has(key)) return false;
@@ -3969,24 +3992,87 @@ function parseAplCsv(text) {
 }
 
 // ---------------------------------------------------------------------------
+// Single entry point for Excel APLs.
+//
+// Runs the structured parser across every sheet, then runs the flat
+// "Brand Name | Supplier" parser across every sheet as well, and unions the
+// two on name+supplier+category. Either parser alone loses tabs: the flat one
+// only ever looked at sheet 1, and the structured one only understands sheets
+// that anchor on a SUPPLIER header.
+//
+// Everything it finds is logged per sheet. If a tab contributes zero brands
+// you can see which tab and why, instead of finding out when a client asks
+// where their Prosecco went.
+// ---------------------------------------------------------------------------
+
+function parseXlsxApl(workbook) {
+  const merged = [];
+  const seen = new Set();
+
+  const add = (b) => {
+    const key = `${String(b.name || '').toLowerCase()}|${String(
+      b.supplier || ''
+    ).toLowerCase()}|${String(b.category || '').toLowerCase()}`;
+    if (!b.name || seen.has(key)) return false;
+    seen.add(key);
+    merged.push(b);
+    return true;
+  };
+
+  // Structured pass — the real client format.
+  try {
+    parseStructuredXlsxApl(workbook).forEach(add);
+  } catch (err) {
+    console.warn('[APL] structured pass found nothing:', err.message);
+  }
+  console.log(`[APL] structured pass: ${merged.length} brands`);
+
+  // Flat pass — every sheet, not just the first.
+  for (const sheetName of workbook.SheetNames) {
+    const sheet = workbook.Sheets[sheetName];
+    if (!sheet || !sheet['!ref']) continue;
+    let added = 0;
+    try {
+      const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+      for (const b of parseAplRows(rows)) if (add(b)) added++;
+    } catch (_) {
+      // No flat header row on this sheet. Expected for the structured format.
+    }
+    if (added) {
+      console.log(`[APL] flat pass, "${sheetName}": +${added} brands`);
+    }
+  }
+
+  console.log(`[APL] TOTAL: ${merged.length} brands`);
+  // Ctrl-F this line in the console to check whether a specific brand made it
+  // in. This is the fastest answer to "is Mionetto / Seedlip actually loaded?"
+  console.log('[APL] names:', merged.map((b) => b.name).join(' | '));
+
+  if (merged.length === 0) {
+    throw new Error(
+      'Could not extract brands from this spreadsheet. Looking for either a flat "Brand Name | Supplier" header row, or category blocks with "SUPPLIER" column headers.'
+    );
+  }
+
+  return merged;
+}
+
+// ---------------------------------------------------------------------------
 // Parse a structured APL workbook (multiple sheets, side-by-side category
-// blocks, "SUPPLIER" column headers). Used as a fallback when the flat parser
-// can't find a single "Brand Name" / "Supplier" header row — i.e., for the
-// real-world client APL format we see in production.
+// blocks, "SUPPLIER" column headers). This is the real-world client format.
 //
 // Algorithm:
-//   1. For each sheet, find every column that contains a "SUPPLIER" header
-//      cell somewhere. These are the supplier columns.
-//   2. Each supplier column owns a column zone: from (previous supplier + 1)
-//      through itself. So a sheet with suppliers in cols B, E, H has zones
-//      A-B, C-E, F-H.
-//   3. For each zone, identify the brand column by voting: in every row that
-//      contains a SUPPLIER header in that zone's supplier column, find the
-//      leftmost non-empty cell in the zone. The column with the most votes
-//      wins (ties broken leftward).
-//   4. Walk every data row in the sheet. Skip rows that are SUPPLIER-header
-//      rows themselves. For each row, pair the brand cell with the supplier
-//      cell. Skip rows where either is empty or looks like a category header.
+//   1. For each sheet, find every cell that reads SUPPLIER (or VENDOR, or
+//      DISTRIBUTOR). These anchor the zones.
+//   2. Walk LEFT from each anchor, stepping over known sub-headers (STYLE,
+//      VARIETAL, REGION...) and blank spacer cells, to elect a brand column.
+//   3. Validate that election by counting the product rows each candidate
+//      column would actually yield, and move it if the elected one is barren.
+//   4. Walk every data row in the sheet, pairing brand cell with supplier
+//      cell, skipping header rows, markers and category labels.
+//
+// Every sheet reports what it produced to the console, so a tab that
+// contributes nothing says so instead of disappearing quietly.
 // ---------------------------------------------------------------------------
 
 function parseStructuredXlsxApl(workbook) {
@@ -4008,10 +4094,27 @@ function parseStructuredXlsxApl(workbook) {
     return false;
   };
 
+  // The anchor that defines a zone. Widened from an exact "SUPPLIER" match: a
+  // tab that writes "Vendor", or "SUPPLIER:" with a colon, produced no zones
+  // at all and therefore no brands, and said nothing about it.
+  const SUPPLIER_ANCHORS = new Set([
+    'SUPPLIER', 'SUPPLIERS', 'VENDOR', 'VENDORS', 'DISTRIBUTOR', 'DISTRIBUTORS',
+  ]);
+  const isSupplierHeader = (s) =>
+    SUPPLIER_ANCHORS.has(
+      String(s || '').replace(/[:*]+\s*$/, '').trim().toUpperCase()
+    );
+
   // Sub-headers that sit BETWEEN the brand column and the SUPPLIER column.
-  // BEER uses STYLE, WINE uses VARIETAL. LIQUOR and NON ALC have neither.
-  // This is why brandCol is not always supplierCol - 1.
-  const SUB_HEADERS = new Set(['STYLE', 'VARIETAL', 'TYPE', 'CATEGORY']);
+  // BEER uses STYLE, WINE uses VARIETAL. This is why brandCol is not always
+  // supplierCol - 1. Wine and sparkling blocks carry more of these than
+  // spirits blocks do, and an unrecognised one used to stop the walk-left
+  // dead and elect the wrong column.
+  const SUB_HEADERS = new Set([
+    'STYLE', 'VARIETAL', 'VARIETY', 'VARIETALS', 'TYPE', 'CATEGORY',
+    'REGION', 'COUNTRY', 'PRODUCER', 'APPELLATION', 'VINTAGE', 'SIZE',
+    'FORMAT', 'ORIGIN', 'ABV', 'COLOR', 'COLOUR', 'SUB TYPE', 'SUBTYPE',
+  ]);
 
   // Venue-approval markers and short venue codes that appear in the columns
   // to the RIGHT of SUPPLIER and in repeated header rows.
@@ -4048,7 +4151,7 @@ function parseStructuredXlsxApl(workbook) {
     t = t.replace(/\s*-\s*\d+\s*$/, '');
     t = t.replace(/\s*\([^)]*\)\s*/g, ' ');
     t = t.replace(/\*/g, '').replace(/\s+/g, ' ').trim();
-    if (!t || t.toUpperCase() === 'SUPPLIER') return '';
+    if (!t || isSupplierHeader(t)) return '';
     if (t.length > 40) return '';
     // Title-case the all-caps headers; leave mixed case ("Chardonnay") alone.
     if (t === t.toUpperCase()) {
@@ -4061,7 +4164,10 @@ function parseStructuredXlsxApl(workbook) {
 
   for (const sheetName of workbook.SheetNames) {
     const sheet = workbook.Sheets[sheetName];
-    if (!sheet || !sheet['!ref']) continue;
+    if (!sheet || !sheet['!ref']) {
+      console.warn(`[APL] "${sheetName}": empty sheet, skipped`);
+      continue;
+    }
 
     const range = XLSX.utils.decode_range(sheet['!ref']);
     const maxRow = range.e.r;
@@ -4076,27 +4182,36 @@ function parseStructuredXlsxApl(workbook) {
 
     // ---- Resolve each zone by walking LEFT from its SUPPLIER anchor. ----
     //
-    // The old code voted for "leftmost non-empty cell in the zone", where the
-    // zone started just after the PREVIOUS supplier column. For a sheet with
-    // venue-approval columns, that start lands inside the previous zone's
+    // The original code voted for "leftmost non-empty cell in the zone", where
+    // the zone started just after the PREVIOUS supplier column. For a sheet
+    // with venue-approval columns, that start lands inside the previous zone's
     // block of X-markers, so the vote elected a marker column as the brand
     // column. Walking left from SUPPLIER is deterministic and can't drift.
-    const zones = new Map(); // supplierCol -> { brandCol, headerRows:Set }
+    const zones = new Map(); // supplierCol -> { brandCol, subCol, headerRows }
 
     for (let r = 0; r <= maxRow; r++) {
       for (let c = 0; c <= maxCol; c++) {
-        if (cellAt(r, c).toUpperCase() !== 'SUPPLIER') continue;
+        if (!isSupplierHeader(cellAt(r, c))) continue;
 
+        // Skip known sub-headers AND blank spacer cells. A blank cell between
+        // the brand column and SUPPLIER used to end the walk immediately,
+        // electing an empty column: the zone then read zero rows and reported
+        // nothing at all.
         let brandCol = c - 1;
-        while (brandCol >= 0 && SUB_HEADERS.has(cellAt(r, brandCol).toUpperCase())) {
-          brandCol -= 1;
+        while (brandCol >= 0) {
+          const h = cellAt(r, brandCol).toUpperCase();
+          if (h === '' || SUB_HEADERS.has(h)) brandCol -= 1;
+          else break;
         }
         if (brandCol < 0) continue;
 
         // Remember the STYLE/VARIETAL column too — for BEER and WINE it holds
         // a far more useful per-row category ("Chardonnay") than the block
-        // header ("WHITE WINE - 6") does.
-        const subCol = c - 1 > brandCol ? c - 1 : -1;
+        // header ("WHITE WINE - 6") does. Take the column NEXT TO the brand
+        // rather than next to SUPPLIER: where a block has two sub-columns
+        // (VARIETAL then REGION), the one beside the brand is the product
+        // type and the one beside SUPPLIER is geography.
+        const subCol = brandCol + 1 < c ? brandCol + 1 : -1;
 
         if (!zones.has(c)) {
           zones.set(c, { brandCol, subCol, headerRows: new Set() });
@@ -4110,10 +4225,69 @@ function parseStructuredXlsxApl(workbook) {
       }
     }
 
+    if (zones.size === 0) {
+      console.warn(
+        `[APL] "${sheetName}": no SUPPLIER header found — 0 brands from this tab`
+      );
+      continue;
+    }
+
+    // ---- Validate the elected brand column before reading the zone. ----
+    //
+    // Header-row inspection is a guess. This counts how many usable product
+    // rows each candidate column would actually yield and moves the election
+    // only when the current pick is clearly barren, so layouts that already
+    // parse correctly are left alone.
+    const countUsable = (brandCol, supplierCol, headerRows) => {
+      if (brandCol < 0) return 0;
+      let n = 0;
+      for (let r = 0; r <= maxRow; r++) {
+        if (headerRows.has(r)) continue;
+        const b = cellAt(r, brandCol);
+        const s = cellAt(r, supplierCol);
+        if (!b || !s) continue;
+        if (isSupplierHeader(s)) continue;
+        if (s.length < 2) continue;
+        if (looksLikeLegendSupplier(s)) continue;
+        if (looksLikeCategoryHeader(b)) continue;
+        if (looksLikeMarker(b)) continue;
+        n++;
+      }
+      return n;
+    };
+
+    const supplierCols = [...zones.keys()].sort((a, b) => a - b);
+    const leftBoundFor = (supplierCol) => {
+      const i = supplierCols.indexOf(supplierCol);
+      return i > 0 ? supplierCols[i - 1] + 1 : 0;
+    };
+
+    for (const [supplierCol, zone] of zones) {
+      const elected = countUsable(zone.brandCol, supplierCol, zone.headerRows);
+      let best = { col: zone.brandCol, n: elected };
+      const floor = Math.max(leftBoundFor(supplierCol), supplierCol - 6);
+      for (let c = supplierCol - 1; c >= floor; c--) {
+        if (c === zone.brandCol) continue;
+        const n = countUsable(c, supplierCol, zone.headerRows);
+        if (n > best.n) best = { col: c, n };
+      }
+
+      if (best.col !== zone.brandCol && elected < best.n * 0.6) {
+        console.warn(
+          `[APL] "${sheetName}": brand column for SUPPLIER col ${supplierCol} ` +
+            `moved ${zone.brandCol} -> ${best.col} (${elected} rows -> ${best.n})`
+        );
+        zone.brandCol = best.col;
+        zone.subCol = zone.brandCol + 1 < supplierCol ? zone.brandCol + 1 : -1;
+      }
+    }
+
     // ---- Read each zone top to bottom. ----
     // Categories stack vertically inside one zone (VODKA, then RUM, then
     // WHISKEY), each re-printing its own header row, so we scan every row and
     // skip the header rows rather than stopping at the first one.
+    const sheetStart = brands.length;
+
     for (const [supplierCol, zone] of zones) {
       // The category label lives in the brand column OF the header row
       // ("VODKA - 11" sits directly left of "SUPPLIER"). Because categories
@@ -4130,7 +4304,7 @@ function parseStructuredXlsxApl(workbook) {
         const brandRaw = cellAt(r, zone.brandCol);
         const supplierRaw = cellAt(r, supplierCol);
         if (!brandRaw || !supplierRaw) continue;
-        if (supplierRaw.toUpperCase() === 'SUPPLIER') continue;
+        if (isSupplierHeader(supplierRaw)) continue;
 
         if (brandRaw.toUpperCase().startsWith('LOCATIONS')) continue;
         if (brandRaw.startsWith('*')) continue;
@@ -4167,6 +4341,12 @@ function parseStructuredXlsxApl(workbook) {
         );
       }
     }
+
+    console.log(
+      `[APL] "${sheetName}": ${brands.length - sheetStart} brands from ${
+        zones.size
+      } zone(s)`
+    );
   }
 
   if (brands.length === 0) {
