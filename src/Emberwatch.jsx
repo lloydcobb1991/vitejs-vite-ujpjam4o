@@ -157,7 +157,14 @@ export default function Emberwatch() {
   const aplInputRef = useRef(null);
 
   // Active APL: custom if uploaded, else built-in.
-  const activeApl = customApl || { name: 'Built-in APL', brands: APL_DATA.brands };
+  // Named so it is unmistakable in the results header. This list is a small
+  // sample for demos, not any client's APL, and running a real batch against
+  // it produces numbers that look completely plausible and are wrong.
+  const activeApl =
+    customApl || {
+      name: 'Built-in sample list — NOT a client APL',
+      brands: APL_DATA.brands,
+    };
 
   const handleFilesChange = (files) => {
     setUploadedFiles(files);
@@ -190,9 +197,9 @@ export default function Emberwatch() {
         const workbook = XLSX.read(arrayBuffer, { type: 'array' });
         brands = parseXlsxApl(workbook);
       } else if (ext === 'csv') {
-        // CSV path
+        // Same two-parser treatment as Excel — see parseCsvApl.
         const text = await file.text();
-        brands = parseAplCsv(text);
+        brands = parseCsvApl(text);
       } else {
         throw new Error(
           `Unsupported file type: .${ext}. Please upload a CSV or Excel file.`
@@ -3992,6 +3999,39 @@ function parseAplCsv(text) {
 }
 
 // ---------------------------------------------------------------------------
+// CSV APLs.
+//
+// The old code ran ONLY the flat "Brand Name | Supplier" parser here. A CSV
+// exported from one tab of a real client APL — side-by-side category blocks
+// with a SUPPLIER header over each — threw "Could not find a brand column",
+// which set aplError and left the app on the built-in sample list. Every
+// number in such a run comes from the wrong brand list while looking fine.
+//
+// The flat parser is still tried first, so simple two-column files behave
+// exactly as before. Anything it can't read now goes to SheetJS and the
+// structured parser, the same path an .xlsx takes. SheetJS also handles
+// quoted cells containing newlines, which the hand-rolled line splitter
+// mangled — the Swingers beer export has one in its title row.
+// ---------------------------------------------------------------------------
+
+function parseCsvApl(text) {
+  try {
+    const flat = parseAplCsv(text);
+    if (flat.length) {
+      console.log(`[APL] flat CSV parse: ${flat.length} brands`);
+      return flat;
+    }
+  } catch (err) {
+    console.log('[APL] no flat header row in this CSV, trying structured:', err.message);
+  }
+
+  const workbook = XLSX.read(String(text || '').replace(/^\uFEFF/, ''), {
+    type: 'string',
+  });
+  return parseXlsxApl(workbook);
+}
+
+// ---------------------------------------------------------------------------
 // Single entry point for Excel APLs.
 //
 // Runs the structured parser across every sheet, then runs the flat
@@ -4313,9 +4353,20 @@ function parseStructuredXlsxApl(workbook) {
         if (supplierRaw.length < 2) continue;
         if (looksLikeLegendSupplier(supplierRaw)) continue;
 
-        // Strip the house-brand dagger so the same brand from two sheets
-        // aggregates into one row.
-        const name = brandRaw.replace(/\s*†\s*/g, ' ').replace(/\s+/g, ' ').trim();
+        // Strip the mandate markers and service notation so the same brand
+        // from two sheets aggregates into one row, and so a supplier report
+        // doesn't read "Tanqueray London Dry +". The dagger and the trailing
+        // "+" are both APL mandate flags; "- BTG & BTB" (by the glass / by
+        // the bottle) is a service note. None are part of the brand name, and
+        // leaving them on breaks the token matcher used for category lookup
+        // and off-APL suppression — "Mionetto (Italy) - BTG & BTB" tokenised
+        // to three words against a menu's one.
+        const name = brandRaw
+          .replace(/\s*†\s*/g, ' ')
+          .replace(/\s*-\s*BT[GB](\s*&\s*BT[GB])?\s*$/i, '')
+          .replace(/\s*\+\s*$/, '')
+          .replace(/\s+/g, ' ')
+          .trim();
         if (!name || looksLikeMarker(name)) continue;
 
         // A brand can legitimately appear twice under one supplier in two
