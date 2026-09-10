@@ -1271,7 +1271,7 @@ function UploadView({
         {/* What the parser actually read. A wrong parse looks identical to a
             right one from the brand count alone — this is the only place
             anyone can catch that before a batch runs. */}
-        <AplReview apl={customApl} />
+        <AplReview apl={activeApl} isCustom={!!customApl} />
 
         <div
           style={{
