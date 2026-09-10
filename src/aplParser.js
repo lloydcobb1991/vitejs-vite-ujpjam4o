@@ -332,7 +332,7 @@ export function parseXlsxApl(workbook) {
     let added = 0;
     try {
       const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
-      for (const b of parseAplRows(rows)) if (add(b)) added++;
+      for (const b of parseAplRows(rows)) if (add({ ...b, sheet: sheetName })) added++;
     } catch (_) {
       // No flat header row on this sheet. Expected for the structured format.
     }
@@ -668,11 +668,14 @@ export function parseStructuredXlsxApl(workbook) {
         if (seen.has(key)) continue;
         seen.add(key);
 
-        brands.push(
-          category
-            ? { name, supplier: supplierRaw, category }
-            : { name, supplier: supplierRaw }
-        );
+        brands.push({
+          name,
+          supplier: supplierRaw,
+          ...(category ? { category } : {}),
+          // Which tab this came off. Carried purely so the review screen can
+          // group by tab — nothing downstream matches on it.
+          sheet: sheetName,
+        });
       }
     }
 
@@ -692,3 +695,106 @@ export function parseStructuredXlsxApl(workbook) {
   return brands;
 }
 
+
+
+// ---------------------------------------------------------------------------
+// Review heuristics.
+//
+// Every APL so far has arrived with a junk shape nobody had seen before —
+// blank varietal headers on Swingers, tier legends and numbered priority
+// lists on Alterra, marker columns on the 2025 Alterra sheet. Writing a rule
+// per shape after the fact does not converge; each new client brings a new
+// one, and each new rule is a chance to break an old one.
+//
+// So this does not try to be right. It flags rows that LOOK like a parse went
+// wrong, so a person can settle it by eye in a few seconds. The
+// varietal check is the important one: it is the exact signature of the
+// Swingers bug, where the wrong column was elected and every wine loaded as
+// its grape instead of its name. That bug was invisible because the brand
+// COUNT was correct.
+// ---------------------------------------------------------------------------
+
+const CATEGORY_LOOKALIKES = new Set([
+  // wine varietals — a brand column full of these means the wrong column won
+  'chardonnay', 'cabernet sauvignon', 'sauvignon blanc', 'pinot noir',
+  'pinot grigio', 'pinot gris', 'merlot', 'malbec', 'zinfandel', 'syrah',
+  'shiraz', 'riesling', 'rose', 'rosé', 'prosecco', 'champagne', 'red blend',
+  'white blend', 'moscato', 'tempranillo', 'sangiovese', 'grenache', 'glera',
+  // beer and spirit styles
+  'domestic', 'import', 'craft', 'lager', 'ale', 'ipa', 'pilsner', 'stout',
+  'porter', 'seltzer', 'cider', 'vodka', 'gin', 'rum', 'tequila', 'mezcal',
+  'whiskey', 'whisky', 'bourbon', 'scotch', 'brandy', 'cognac', 'liqueur',
+  'vermouth', 'spiced', 'blanco', 'reposado', 'silver',
+]);
+
+export function reviewApl(brands) {
+  const list = brands || [];
+  const bySheet = new Map();
+  for (const b of list) {
+    const k = b.sheet || 'Unknown';
+    if (!bySheet.has(k)) bySheet.set(k, []);
+    bySheet.get(k).push(b);
+  }
+
+  const warnings = [];
+
+  // A tab whose "brand" column is mostly style words means the parser elected
+  // the wrong column on that tab. This is the Swingers wine bug.
+  for (const [sheetName, rows] of bySheet) {
+    const lookalikes = rows.filter((b) =>
+      CATEGORY_LOOKALIKES.has(String(b.name || '').trim().toLowerCase())
+    );
+    if (rows.length >= 3 && lookalikes.length / rows.length >= 0.4) {
+      warnings.push({
+        kind: 'wrong-column',
+        sheet: sheetName,
+        text: `${lookalikes.length} of ${rows.length} names on "${sheetName}" are styles or varietals, not brands. The parser probably read the wrong column on this tab.`,
+      });
+    }
+  }
+
+  // Prose or labels that slipped through as products.
+  const overlong = list.filter((b) => String(b.name || '').length > 45);
+  if (overlong.length) {
+    warnings.push({
+      kind: 'long-name',
+      text: `${overlong.length} name${overlong.length === 1 ? ' is' : 's are'} unusually long and may be section text rather than a product.`,
+      examples: overlong.slice(0, 3).map((b) => b.name),
+    });
+  }
+
+  // Repeats are often legitimate cross-listings (one product in two blocks),
+  // so this is surfaced rather than treated as an error.
+  const seen = new Map();
+  for (const b of list) {
+    const k = String(b.name || '').trim().toLowerCase();
+    seen.set(k, (seen.get(k) || 0) + 1);
+  }
+  const dupes = [...seen.entries()].filter(([, n]) => n > 1);
+  if (dupes.length) {
+    warnings.push({
+      kind: 'duplicate',
+      text: `${dupes.length} name${dupes.length === 1 ? ' appears' : 's appear'} more than once. Usually a product cross-listed in two blocks — check it is not the same row read twice.`,
+      examples: dupes.slice(0, 3).map(([n]) => n),
+    });
+  }
+
+  const noSupplier = list.filter(
+    (b) => !b.supplier || b.supplier === 'UNKNOWN'
+  );
+  if (noSupplier.length) {
+    warnings.push({
+      kind: 'no-supplier',
+      text: `${noSupplier.length} brand${noSupplier.length === 1 ? ' has' : 's have'} no supplier, so nothing will be billed for them.`,
+      examples: noSupplier.slice(0, 3).map((b) => b.name),
+    });
+  }
+
+  return {
+    total: list.length,
+    sheets: [...bySheet.entries()]
+      .map(([name, rows]) => ({ name, rows }))
+      .sort((a, b) => a.name.localeCompare(b.name)),
+    warnings,
+  };
+}
