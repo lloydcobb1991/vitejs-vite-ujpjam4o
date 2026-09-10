@@ -17,6 +17,7 @@ import {
 import * as XLSX from 'xlsx';
 import { PDFDocument } from 'pdf-lib';
 import MenuDropzone from './MenuDropzone';
+import AplReview from './AplReview';
 import {
   matchesAplBrand,
   canonicalizeBrand,
@@ -1266,6 +1267,11 @@ function UploadView({
             {aplError}
           </div>
         )}
+
+        {/* What the parser actually read. A wrong parse looks identical to a
+            right one from the brand count alone — this is the only place
+            anyone can catch that before a batch runs. */}
+        <AplReview apl={customApl} />
 
         <div
           style={{
