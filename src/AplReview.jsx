@@ -17,12 +17,19 @@ import { reviewApl } from './aplParser';
 // looking is worth more than another special-case rule.
 // ===========================================================================
 
-export default function AplReview({ apl }) {
+export default function AplReview({ apl, isCustom = true }) {
   const [open, setOpen] = useState(false);
   const [filter, setFilter] = useState('');
   const [openSheets, setOpenSheets] = useState({});
 
-  const review = useMemo(() => reviewApl(apl?.brands || []), [apl]);
+  const review = useMemo(() => {
+    // The built-in sample list is a flat array with no sheet tags. Give it a
+    // label rather than letting it group under "Unknown".
+    const brands = (apl?.brands || []).map((b) =>
+      b.sheet ? b : { ...b, sheet: isCustom ? 'Sheet 1' : 'Built-in sample list' }
+    );
+    return reviewApl(brands);
+  }, [apl, isCustom]);
   if (!apl || !apl.brands?.length) return null;
 
   const q = filter.trim().toLowerCase();
