@@ -74,29 +74,58 @@ export function tokensMatch(a, b) {
 // True when an off-APL entry is really an APL brand under different wording.
 // Deliberately conservative: every token must line up, so "Don Julio Reposado"
 // stays off-APL against an APL that only carries "Don Julio Blanco".
+const seqMatch = (a, b) =>
+  a.length === b.length && a.every((t, i) => tokensMatch(t, b[i]));
+
 export function matchesAplBrand(offName, aplBrands) {
   const off = offAplTokens(offName);
   if (off.length === 0) return null;
+  const list = aplBrands || [];
 
-  for (const b of aplBrands || []) {
+  // 1. Exact token sequence against the APL name.
+  //
+  // Same number of meaningful tokens, matching position for position.
+  // Allowing the APL name to be one token shorter let a general entry
+  // swallow a specific SKU — "Hendrick's" absorbing "Hendrick's Neptunia",
+  // "Casa Noble Blanco" absorbing "Casamigos". Descriptor words are already
+  // stripped from both sides, so a genuine rewording lands on equal counts.
+  for (const b of list) {
     const apl = offAplTokens(b.name);
-    if (apl.length === 0) continue;
-
-    // Same number of meaningful tokens, matching position for position.
-    // Allowing the APL name to be one token shorter let a general entry
-    // swallow a specific SKU — "Hendrick's" absorbing "Hendrick's Neptunia",
-    // "Casa Noble Blanco" absorbing "Casamigos". Descriptor words are already
-    // stripped from both sides, so a genuine rewording lands on equal counts.
-    if (off.length !== apl.length) continue;
-    let ok = true;
-    for (let i = 0; i < off.length; i++) {
-      if (!tokensMatch(off[i], apl[i])) {
-        ok = false;
-        break;
-      }
-    }
-    if (ok) return b;
+    if (apl.length && seqMatch(off, apl)) return b;
   }
+
+  // 2. APL NAME + ITS CATEGORY.
+  //
+  // Wine APLs put the winery in the brand column and the grape in its own
+  // column: name "Hayes Ranch", category "Pinot Noir". Menus write the two
+  // joined — "Hayes Ranch Pinot Noir" — so against rule 1 every wine on
+  // every menu failed, on both OHM bar books and every wine list before
+  // them. Matching name+category also picks the RIGHT row, so a menu's
+  // Chardonnay lands on the Chardonnay row rather than on whichever entry
+  // for that winery happened to come first.
+  for (const b of list) {
+    if (!b.category) continue;
+    const combined = [...offAplTokens(b.name), ...offAplTokens(b.category)];
+    if (combined.length && seqMatch(off, combined)) return b;
+  }
+
+  // 3. The menu name is SHORTER than the APL name, and only one APL row
+  //    starts with it.
+  //
+  // "Jack Daniel's" for "Jack Daniel's Tennessee", "Fireball" for "Fireball
+  // Cinnamon", "Baileys" for "Baileys Original Irish Cream". Uniqueness is
+  // what makes this safe: "Milagro" alone matches both Silver and Reposado,
+  // so it stays unmatched and a person decides. This is deliberately the
+  // opposite direction from a menu that is MORE specific than the APL —
+  // "Absolut Vanilla" against "Absolut" is a different product and is still
+  // rejected by every rule here.
+  const prefixHits = list.filter((b) => {
+    const apl = offAplTokens(b.name);
+    return apl.length > off.length && off.every((t, i) => tokensMatch(t, apl[i]));
+  });
+  const distinct = new Set(prefixHits.map((b) => b.name.toLowerCase()));
+  if (distinct.size === 1) return prefixHits[0];
+
   return null;
 }
 
@@ -437,8 +466,16 @@ export function parseStructuredXlsxApl(workbook) {
     'SLATE', 'NAVY', 'OLIVE', 'MAROON', 'IVORY', 'CHARCOAL', 'MINT', 'PEACH',
     'COLOR / ICON', 'COLOR/ICON', 'COLOR', 'ICON',
   ]);
-  const looksLikeLegendSupplier = (s) =>
-    LEGEND_COLOR_WORDS.has(s.trim().toUpperCase());
+  const LEGEND_ICON_WORDS = new Set(['ANVIL', 'STAR', 'DIAMOND', 'CIRCLE',
+    'SQUARE', 'TRIANGLE', 'DOT', 'CHECK', 'CROSS', 'FLAG', 'HEART']);
+  const looksLikeLegendSupplier = (s) => {
+    const t = s.trim().toUpperCase();
+    if (LEGEND_COLOR_WORDS.has(t) || LEGEND_ICON_WORDS.has(t)) return true;
+    // "Light Green", "Dark Green", "Pale Blue" — a shade qualifier plus a
+    // colour is still a legend entry, not a supplier.
+    const m = t.match(/^(LIGHT|DARK|PALE|BRIGHT|DEEP|MED|MEDIUM)\s+(.+)$/);
+    return !!m && LEGEND_COLOR_WORDS.has(m[2]);
+  };
 
   // Service-tier and venue-type labels sitting where a brand name should be.
   // An all-caps cell built around a slash is a label ("POP-UP / SATELLITE",
@@ -602,12 +639,27 @@ export function parseStructuredXlsxApl(workbook) {
       // stack down a zone, we track the most recent one as we descend.
       let currentCategory = '';
 
+      // Some APLs end a tab with a LEGEND block mapping each venue to a
+      // colour or icon, laid out exactly like brand/supplier pairs. Matching
+      // on the colour word alone missed "Light Green", "Dark Green" and the
+      // icon name "Anvil", so three venue names per tab loaded as products.
+      // Latching on the LEGEND row itself catches the whole block whatever
+      // the right-hand cell says.
+      let inLegend = false;
+
       for (let r = 0; r <= maxRow; r++) {
         if (zone.headerRows.has(r)) {
+          inLegend = false;
           const label = cleanCategoryLabel(cellAt(r, zone.brandCol));
           if (label) currentCategory = label;
           continue;
         }
+
+        if (cellAt(r, zone.brandCol).trim().toUpperCase() === 'LEGEND') {
+          inLegend = true;
+          continue;
+        }
+        if (inLegend) continue;
 
         const brandRaw = cellAt(r, zone.brandCol);
         const supplierRaw = cellAt(r, supplierCol);
