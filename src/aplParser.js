@@ -66,7 +66,14 @@ export function editDistance(a, b) {
 export function tokensMatch(a, b) {
   if (a === b) return true;
   const [short, long] = a.length <= b.length ? [a, b] : [b, a];
-  if (short.length >= 3 && long.startsWith(short)) return true;
+  // An abbreviation trims a little off the end — "Sam" for "Samuel", "Tito"
+  // for "Tito's". Any-length prefix was too loose: it made "Red" match
+  // "Redbreast", so a menu saying Redbreast collided with all four Red Bull
+  // entries and resolved to nothing. Capping the gap keeps the real
+  // abbreviations and drops the coincidences.
+  if (short.length >= 3 && long.startsWith(short) && long.length - short.length <= 3) {
+    return true;
+  }
   if (short.length >= 6 && editDistance(a, b) <= 1) return true;
   return false;
 }
@@ -119,6 +126,8 @@ export function matchesAplBrand(offName, aplBrands) {
   // opposite direction from a menu that is MORE specific than the APL —
   // "Absolut Vanilla" against "Absolut" is a different product and is still
   // rejected by every rule here.
+  if (!distinctiveEnoughAlone(off)) return null;
+
   const prefixHits = list.filter((b) => {
     const apl = offAplTokens(b.name);
     return apl.length > off.length && off.every((t, i) => tokensMatch(t, apl[i]));
@@ -127,6 +136,40 @@ export function matchesAplBrand(offName, aplBrands) {
   if (distinct.size === 1) return prefixHits[0];
 
   return null;
+}
+
+// Words too ordinary to identify a brand on their own. Without this guard the
+// shortening rule above turns any menu that lists BASIL as a garnish into a
+// Basil Hayden Bourbon impression, because "Basil Hayden Bourbon" is the only
+// APL entry starting with that word. Same trap for eagle, angel, brother, el,
+// del — 129 of the 298 entries on the OHM sheet have a first word unique
+// enough to auto-resolve, and these are the ones where that is wrong.
+const NOT_DISTINCTIVE_ALONE = new Set([
+  // garnishes, produce and ingredients that share a word with a brand
+  'basil', 'mint', 'sage', 'thyme', 'rosemary', 'lavender', 'cherry',
+  'orange', 'lemon', 'lime', 'peach', 'apple', 'pear', 'ginger', 'honey',
+  'maple', 'cinnamon', 'clove', 'pepper', 'salt', 'sugar', 'cream', 'egg',
+  'olive', 'cucumber', 'grapefruit', 'pineapple', 'coconut', 'vanilla',
+  'coffee', 'espresso', 'tea', 'soda', 'tonic', 'water', 'juice', 'syrup',
+  // animals, titles and common nouns that open brand names
+  'eagle', 'angel', 'angels', 'brother', 'brothers', 'monkey', 'horse',
+  'bull', 'buffalo', 'crown', 'king', 'queen', 'empress', 'captain',
+  'sailor', 'jack', 'jim', 'george', 'william', 'four', 'three', 'two',
+  'high', 'old', 'wild', 'black', 'white', 'red', 'blue', 'green', 'grey',
+  'gray', 'gold', 'silver', 'stone', 'rock', 'ranch', 'estate', 'reserve',
+  'house', 'grand', 'royal', 'true', 'lost', 'blue',
+  // articles and particles
+  'el', 'la', 'le', 'los', 'las', 'del', 'de', 'di', 'da', 'san', 'santa',
+  'saint', 'st', 'don', 'dos', 'mr', 'mrs', 'ms',
+]);
+
+// A menu phrase may only resolve to a LONGER APL name when it carries enough
+// signal on its own: two or more meaningful words, or one long distinctive
+// one. "Fireball" and "WhistlePig" qualify; "basil" and "el" do not.
+function distinctiveEnoughAlone(tokens) {
+  if (tokens.length >= 2) return true;
+  const w = tokens[0] || '';
+  return w.length >= 6 && !NOT_DISTINCTIVE_ALONE.has(w);
 }
 
 // ---------------------------------------------------------------------------
@@ -525,6 +568,32 @@ export function parseStructuredXlsxApl(workbook) {
       return String(cell.v).replace(/\s+/g, ' ').trim();
     };
 
+    // ---- Venue columns. ----
+    //
+    // Everything to the RIGHT of SUPPLIER is a per-venue approval grid: one
+    // column per outlet, an X where that outlet may carry the brand. We used
+    // to ignore it entirely, so a menu for one venue was scored against every
+    // brand approved at any venue — on the OHM sheet that is 84 brands marked
+    // for Cambria Mesa against a list of 298.
+    //
+    // The wrinkle is that the FIRST header row of a tab spells the venues out
+    // ("Cambria Mesa") and every block below it abbreviates ("CM"), in the
+    // same column order. So align the two rows positionally once per sheet
+    // and resolve every later header through that map.
+    const venueHeadersAt = (r, supplierCol) => {
+      const out = [];
+      for (let k = supplierCol + 1; k <= maxCol; k++) {
+        const h = cellAt(r, k);
+        if (!h || isSupplierHeader(h) || looksLikeCategoryHeader(h)) break;
+        if (h === 'Column1') continue;
+        out.push([k, h]);
+      }
+      return out;
+    };
+
+    let venueFullNames = null;   // from the first header row on this sheet
+    let venueAlias = new Map();  // "CM" -> "Cambria Mesa"
+
     // ---- Resolve each zone by walking LEFT from its SUPPLIER anchor. ----
     //
     // The original code voted for "leftmost non-empty cell in the zone", where
@@ -559,9 +628,15 @@ export function parseStructuredXlsxApl(workbook) {
         const subCol = brandCol + 1 < c ? brandCol + 1 : -1;
 
         if (!zones.has(c)) {
-          zones.set(c, { brandCol, subCol, headerRows: new Set() });
+          zones.set(c, {
+            brandCol,
+            subCol,
+            headerRows: new Set(),
+            venueCols: new Map(), // headerRow -> [[col, label], ...]
+          });
         }
         const zone = zones.get(c);
+        zone.venueCols.set(r, venueHeadersAt(r, c));
         if (zone.subCol === -1 && subCol !== -1) zone.subCol = subCol;
         // A repeated header row that omits STYLE must not pull the zone
         // rightwards onto the sub-header column.
@@ -627,6 +702,54 @@ export function parseStructuredXlsxApl(workbook) {
       }
     }
 
+    // ---- Resolve the venue vocabulary for this sheet. ----
+    //
+    // Gather every venue header row across every zone, in row order. The
+    // first one carries the full names; the first one after it that differs
+    // carries the abbreviations. Align them by position.
+    {
+      const rowsSeen = [];
+      for (const zone of zones.values()) {
+        for (const [r, cols] of zone.venueCols) {
+          if (cols.length) rowsSeen.push([r, cols.map(([, h]) => h)]);
+        }
+      }
+      rowsSeen.sort((a, b) => a[0] - b[0]);
+
+      // The canonical row is the one written out in full. Abbreviations are
+      // short and rarely contain a space, so score each candidate and take
+      // the best — not simply the first, because several zones share the top
+      // header row and only one of them may be the spelled-out one.
+      const fullness = (labels) =>
+        labels.filter((h) => h.length > 4 || h.includes(' ')).length /
+        Math.max(1, labels.length);
+      let best = null;
+      for (const [, labels] of rowsSeen) {
+        const score = fullness(labels);
+        if (!best || score > best.score || (score === best.score && labels.length > best.labels.length)) {
+          best = { score, labels };
+        }
+      }
+      venueFullNames = best ? best.labels : [];
+
+      // Map every other header row onto it positionally. Rows longer than the
+      // canonical list are truncated: anything past the last named venue is
+      // a neighbouring block's label that leaked in, not an outlet.
+      for (const [, labels] of rowsSeen) {
+        labels.slice(0, venueFullNames.length).forEach((short, i) => {
+          const full = venueFullNames[i];
+          if (full && short && short !== full) {
+            venueAlias.set(short.toUpperCase(), full);
+          }
+        });
+      }
+    }
+    const venueLimit = venueFullNames.length;
+    const resolveVenue = (label) => {
+      const t = String(label || '').trim();
+      return venueAlias.get(t.toUpperCase()) || t;
+    };
+
     // ---- Read each zone top to bottom. ----
     // Categories stack vertically inside one zone (VODKA, then RUM, then
     // WHISKEY), each re-printing its own header row, so we scan every row and
@@ -647,9 +770,15 @@ export function parseStructuredXlsxApl(workbook) {
       // the right-hand cell says.
       let inLegend = false;
 
+      // Which venue columns apply to the rows we are currently reading. Each
+      // block re-prints its own header, and the column positions shift
+      // between blocks, so this is re-set at every header row.
+      let activeVenueCols = [];
+
       for (let r = 0; r <= maxRow; r++) {
         if (zone.headerRows.has(r)) {
           inLegend = false;
+          activeVenueCols = zone.venueCols.get(r) || [];
           const label = cleanCategoryLabel(cellAt(r, zone.brandCol));
           if (label) currentCategory = label;
           continue;
@@ -720,10 +849,20 @@ export function parseStructuredXlsxApl(workbook) {
         if (seen.has(key)) continue;
         seen.add(key);
 
+        // Which outlets may carry this brand. An empty array means the tab
+        // has no venue grid at all, which is different from "approved
+        // nowhere" — callers treat a brand with no venue data as unrestricted
+        // rather than silently dropping it.
+        const venues = activeVenueCols
+          .slice(0, venueLimit || activeVenueCols.length)
+          .filter(([col]) => cellAt(r, col) !== '')
+          .map(([, label]) => resolveVenue(label));
+
         brands.push({
           name,
           supplier: supplierRaw,
           ...(category ? { category } : {}),
+          ...(venues.length ? { venues } : {}),
           // Which tab this came off. Carried purely so the review screen can
           // group by tab — nothing downstream matches on it.
           sheet: sheetName,
@@ -849,4 +988,37 @@ export function reviewApl(brands) {
       .sort((a, b) => a.name.localeCompare(b.name)),
     warnings,
   };
+}
+// ---------------------------------------------------------------------------
+// Venue scoping.
+//
+// An APL is not one list — it is a grid. Each outlet carries a subset, and
+// the columns to the right of SUPPLIER say which. Scoring a single venue's
+// menu against the whole grid counts brands that venue is not cleared to
+// pour: on the OHM sheet, Cambria Mesa is marked for 129 of 298 brands.
+//
+// A brand with no venue data at all (a tab with no grid) is treated as
+// unrestricted rather than approved-nowhere, so an APL without the columns
+// behaves exactly as it did before.
+// ---------------------------------------------------------------------------
+
+export function aplVenues(brands) {
+  const counts = new Map();
+  for (const b of brands || []) {
+    for (const v of b.venues || []) counts.set(v, (counts.get(v) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([name, count]) => ({ name, count }));
+}
+
+export function approvedAtVenue(brand, venue) {
+  if (!venue) return true;
+  if (!brand.venues || brand.venues.length === 0) return true;
+  return brand.venues.includes(venue);
+}
+
+export function filterAplByVenue(brands, venue) {
+  if (!venue) return brands || [];
+  return (brands || []).filter((b) => approvedAtVenue(b, venue));
 }
