@@ -24,6 +24,8 @@ import {
   offAplTokens,
   parseCsvApl,
   parseXlsxApl,
+  aplVenues,
+  filterAplByVenue,
 } from './aplParser';
 
 // ---------------------------------------------------------------------------
@@ -168,6 +170,19 @@ export default function Emberwatch() {
   const [customApl, setCustomApl] = useState(null); // { name, brands } or null
   const [aplError, setAplError] = useState(null);
   const aplInputRef = useRef(null);
+  // Which outlet these menus belong to. '' means the whole APL, which is what
+  // every run did before — correct only when the menus genuinely span every
+  // venue on the list.
+  const [selectedVenue, setSelectedVenue] = useState('');
+  // Per-menu overrides, keyed by filename. A batch usually belongs to one
+  // outlet, so the selector above is the default and this only holds the
+  // exceptions — but OHM alone has eleven outlets, and a 38-menu batch
+  // spans several, so one venue for a whole run is not good enough.
+  const [menuVenues, setMenuVenues] = useState({});
+  const venueForFile = (fileName) =>
+    Object.prototype.hasOwnProperty.call(menuVenues, fileName)
+      ? menuVenues[fileName]
+      : selectedVenue;
 
   // Active APL: custom if uploaded, else built-in.
   // Named so it is unmistakable in the results header. This list is a small
@@ -179,16 +194,24 @@ export default function Emberwatch() {
       brands: APL_DATA.brands,
     };
 
+  // The venues this APL knows about, and the subset approved at the one
+  // chosen. `scopedApl` is what the model is shown and what impressions are
+  // counted against; `activeApl` stays the full grid, because telling the
+  // difference between "not on the APL at all" and "on the APL but not
+  // cleared for this outlet" needs both.
+  const venueOptions = aplVenues(activeApl.brands);
+  const scopedBrands = filterAplByVenue(activeApl.brands, selectedVenue);
+  const scopedApl = { ...activeApl, brands: scopedBrands };
+
   const handleFilesChange = (files) => {
     setUploadedFiles(files);
     // Drop notes whose file is no longer in the batch, so a note can't
     // silently attach itself to a different menu on a later run.
-    setMenuNotes((prev) => {
-      const keep = new Set(files.map((f) => f.name));
-      return Object.fromEntries(
-        Object.entries(prev).filter(([k]) => keep.has(k))
-      );
-    });
+    const keep = new Set(files.map((f) => f.name));
+    const prune = (prev) =>
+      Object.fromEntries(Object.entries(prev).filter(([k]) => keep.has(k)));
+    setMenuNotes(prune);
+    setMenuVenues(prune);
     setResults(null);
     setError(null);
   };
@@ -234,6 +257,8 @@ export default function Emberwatch() {
       }
 
       setCustomApl({ name: file.name, brands });
+      setSelectedVenue('');
+      setMenuVenues({});
     } catch (err) {
       console.error('APL parse error:', err);
       setAplError(err.message || 'Could not read this APL file.');
@@ -255,6 +280,7 @@ export default function Emberwatch() {
 
   const clearCustomApl = () => {
     setCustomApl(null);
+    setSelectedVenue('');
     setAplError(null);
   };
 
@@ -292,6 +318,12 @@ export default function Emberwatch() {
         const file = uploadedFiles[i];
         const label = `${file.name} (${i + 1}/${uploadedFiles.length})`;
 
+        // Each menu is scored against its OWN outlet's list. A batch that
+        // spans outlets used to be impossible to run correctly: one selector
+        // meant either the wrong scope for most menus, or no scope at all.
+        const fileVenue = venueForFile(file.name);
+        const fileBrands = filterAplByVenue(activeApl.brands, fileVenue);
+
         try {
           setProgress(`Reading ${label}...`);
           const chunks = await readMenuFileAsChunks(file);
@@ -315,6 +347,7 @@ export default function Emberwatch() {
                 name: file.name,
                 base64: chunks[c],
                 note: (menuNotes[file.name] || '').trim(),
+                brands: fileBrands,
               })
             );
           }
@@ -330,6 +363,10 @@ export default function Emberwatch() {
             // produced its numbers. An unrecorded instruction means a count
             // nobody can explain later.
             note: (menuNotes[file.name] || '').trim(),
+            // The outlet this menu was scored for, and how many brands that
+            // left. Recorded per menu because a batch can span outlets.
+            venue: fileVenue,
+            scopeSize: fileBrands.length,
             ...analysis,
           });
         } catch (menuErr) {
@@ -374,7 +411,17 @@ export default function Emberwatch() {
       const aggregated = aggregateBySupplier(menuAnalyses);
       const offApl = aggregateOffApl(menuAnalyses, activeApl);
 
-      setResults({ menuAnalyses, aggregated, offApl, failedMenus, splitNotices });
+      setResults({
+        menuAnalyses,
+        aggregated,
+        offApl,
+        failedMenus,
+        splitNotices,
+        venue: selectedVenue,
+        venues: [
+          ...new Set(menuAnalyses.map((m) => m.venue).filter(Boolean)),
+        ],
+      });
       setView('results');
       setProgress('');
     } catch (err) {
@@ -388,9 +435,9 @@ export default function Emberwatch() {
 
   // Brand names that appear more than once in the active APL under different
   // categories. These are the only ones that need a category tag in the prompt.
-  const ambiguousAplNames = (() => {
+  const ambiguousAplNamesFor = (brands) => {
     const byName = new Map();
-    for (const b of activeApl.brands) {
+    for (const b of brands) {
       const k = String(b.name || '').trim().toLowerCase();
       if (!byName.has(k)) byName.set(k, []);
       byName.get(k).push(String(b.category || '').toLowerCase());
@@ -411,10 +458,11 @@ export default function Emberwatch() {
       if (!selfIdentifying) out.add(name);
     }
     return out;
-  })();
+  };
 
-  const analyzeMenuWithClaude = async ({ name, base64, note }) => {
-    const brandList = activeApl.brands
+  const analyzeMenuWithClaude = async ({ name, base64, note, brands }) => {
+    const ambiguousAplNames = ambiguousAplNamesFor(brands);
+    const brandList = brands
       .map((b) => {
         // Only surface the category when it actually disambiguates. Tagging
         // every line adds noise; tagging the collisions is what stops
@@ -849,14 +897,26 @@ ONLY respond with JSON — no commentary before or after it. Include the "cockta
     // separated block so it can't be confused with the impression rows above.
     if (results.offApl && results.offApl.length > 0) {
       rows.push([]);
-      rows.push(['NOT IN APL (for review — not billed, not emailed)']);
-      rows.push(['Brand', 'Category', 'Locations', 'Mentions']);
+      rows.push(['NOT COUNTED (for review — not billed, not emailed)']);
+      rows.push(['Brand', 'Category', 'Why not counted', 'Locations', 'Mentions']);
       results.offApl.forEach((b) => {
         const locs = Object.entries(b.locations)
           .map(([loc, c]) => `${loc} (${c})`)
           .join('; ');
+        const why =
+          b.status === 'not-approved'
+            ? `On the APL as "${b.aplName}" (${b.supplier}) but not approved at ${
+                (b.flaggedAt || []).join(', ') || 'this outlet'
+              }`
+            : 'Not on the APL';
         // Quote the free-text fields so any stray commas don't break columns.
-        rows.push([csvCell(b.name), csvCell(b.category || ''), csvCell(locs), b.total]);
+        rows.push([
+          csvCell(b.name),
+          csvCell(b.category || ''),
+          csvCell(why),
+          csvCell(locs),
+          b.total,
+        ]);
       });
     }
 
@@ -1037,6 +1097,20 @@ ONLY respond with JSON — no commentary before or after it. Include the "cockta
     // is the whole reason the note field is safe to have: a number you cannot
     // explain is worse than a number you did not get.
     const noted = results.menuAnalyses.filter((m) => (m.note || '').trim());
+    const scopedMenus = results.menuAnalyses.filter((m) => m.venue);
+    const venueRows = scopedMenus.length
+      ? [
+          [],
+          ['OUTLET EACH MENU WAS SCORED FOR'],
+          ['Menu file', 'Outlet', 'Brands in scope'],
+          ...results.menuAnalyses.map((m) => [
+            csvCell(m.filename),
+            csvCell(m.venue || 'All outlets — whole APL'),
+            m.scopeSize ?? '',
+          ]),
+        ]
+      : [[], ['Scored against the whole APL (no outlet selected)']];
+
     const noteRows = noted.length
       ? [
           [],
@@ -1047,6 +1121,7 @@ ONLY respond with JSON — no commentary before or after it. Include the "cockta
       : [];
 
     const footer = [
+      ...venueRows,
       ...noteRows,
       [],
       [
@@ -1095,6 +1170,18 @@ ONLY respond with JSON — no commentary before or after it. Include the "cockta
       {view === 'upload' && (
         <UploadView
           uploadedFiles={uploadedFiles}
+          venueOptions={venueOptions}
+          selectedVenue={selectedVenue}
+          onVenueChange={setSelectedVenue}
+          scopedCount={scopedApl.brands.length}
+          menuVenues={menuVenues}
+          venueForFile={venueForFile}
+          onMenuVenueChange={(fileName, venue) =>
+            setMenuVenues((prev) => ({ ...prev, [fileName]: venue }))
+          }
+          scopeSizeFor={(venue) =>
+            filterAplByVenue(activeApl.brands, venue).length
+          }
           menuNotes={menuNotes}
           onNoteChange={(fileName, text) =>
             setMenuNotes((prev) => ({ ...prev, [fileName]: text }))
@@ -1159,11 +1246,26 @@ ONLY respond with JSON — no commentary before or after it. Include the "cockta
 // from the run, so any number it influenced can be traced back to it.
 // ===========================================================================
 
-function MenuNotes({ files, notes, onChange, disabled }) {
+function MenuSettings({
+  files,
+  notes,
+  onNoteChange,
+  venueOptions,
+  menuVenues,
+  venueForFile,
+  onMenuVenueChange,
+  scopeSizeFor,
+  defaultVenue,
+  disabled,
+}) {
   const [open, setOpen] = useState(false);
   if (!files || files.length === 0) return null;
 
   const filled = files.filter((f) => (notes?.[f.name] || '').trim()).length;
+  const overridden = files.filter((f) =>
+    Object.prototype.hasOwnProperty.call(menuVenues || {}, f.name)
+  ).length;
+  const hasVenues = venueOptions && venueOptions.length > 0;
 
   return (
     <div style={{ margin: '24px 0 8px' }}>
@@ -1186,7 +1288,7 @@ function MenuNotes({ files, notes, onChange, disabled }) {
         }}
       >
         <Edit3 size={16} />
-        Notes for the analysis (optional)
+        Per-menu outlet and notes (optional)
         <span
           style={{
             marginLeft: 'auto',
@@ -1195,9 +1297,12 @@ function MenuNotes({ files, notes, onChange, disabled }) {
             color: filled ? '#da291c' : '#999',
           }}
         >
-          {filled
-            ? `${filled} of ${files.length} menu${files.length === 1 ? '' : 's'} noted`
-            : 'none'}
+          {[
+            overridden ? `${overridden} outlet override${overridden === 1 ? '' : 's'}` : '',
+            filled ? `${filled} noted` : '',
+          ]
+            .filter(Boolean)
+            .join(' · ') || 'using batch defaults'}
         </span>
       </button>
 
@@ -1211,11 +1316,13 @@ function MenuNotes({ files, notes, onChange, disabled }) {
               marginBottom: '12px',
             }}
           >
-            Use this to say something about the <strong style={{ color: '#666' }}>document</strong> —
-            which pages hold the drinks, what to disregard, how a section is
-            laid out. Notes cannot change what counts as an impression or add
-            anything to the APL, and each one is printed on the detail CSV and
-            on the emails from this run so the numbers stay explainable.
+            Every menu uses the batch outlet unless you change it here — set
+            that when one batch spans several properties. Notes are for the{' '}
+            <strong style={{ color: '#666' }}>document</strong>: which pages
+            hold the drinks, what to disregard, how a section is laid out.
+            They cannot change what counts as an impression or add anything to
+            the APL, and each is printed on the detail CSV and on the emails
+            from this run so the numbers stay explainable.
           </div>
 
           {files.map((f) => (
@@ -1230,9 +1337,51 @@ function MenuNotes({ files, notes, onChange, disabled }) {
               >
                 {f.name}
               </div>
+              {hasVenues && (
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    marginBottom: '6px',
+                    flexWrap: 'wrap',
+                  }}
+                >
+                  <select
+                    value={venueForFile(f.name)}
+                    onChange={(e) => onMenuVenueChange(f.name, e.target.value)}
+                    disabled={disabled}
+                    style={{
+                      padding: '8px 10px',
+                      fontSize: '13px',
+                      fontWeight: '700',
+                      border: `2px solid ${
+                        venueForFile(f.name) !== defaultVenue ? '#da291c' : '#ddd'
+                      }`,
+                      borderRadius: '6px',
+                      background: 'white',
+                      cursor: 'pointer',
+                      maxWidth: '100%',
+                    }}
+                  >
+                    <option value="">All outlets — whole APL</option>
+                    {venueOptions.map((v) => (
+                      <option key={v.name} value={v.name}>
+                        {v.name}
+                      </option>
+                    ))}
+                  </select>
+                  <span style={{ fontSize: '12px', color: '#999', fontWeight: '600' }}>
+                    {scopeSizeFor(venueForFile(f.name))} brands in scope
+                    {venueForFile(f.name) !== defaultVenue && (
+                      <strong style={{ color: '#da291c' }}> · overridden</strong>
+                    )}
+                  </span>
+                </div>
+              )}
               <textarea
                 value={notes?.[f.name] || ''}
-                onChange={(e) => onChange(f.name, e.target.value)}
+                onChange={(e) => onNoteChange(f.name, e.target.value)}
                 disabled={disabled}
                 rows={2}
                 maxLength={600}
@@ -1259,6 +1408,14 @@ function MenuNotes({ files, notes, onChange, disabled }) {
 
 function UploadView({
   uploadedFiles,
+  venueOptions,
+  selectedVenue,
+  onVenueChange,
+  scopedCount,
+  menuVenues,
+  venueForFile,
+  onMenuVenueChange,
+  scopeSizeFor,
   menuNotes,
   onNoteChange,
   analyzing,
@@ -1372,6 +1529,14 @@ function UploadView({
               {activeApl.brands.length} brand
               {activeApl.brands.length !== 1 ? 's' : ''} loaded ·{' '}
               {customApl ? 'Custom upload' : 'Using built-in list'}
+              {selectedVenue && (
+                <>
+                  {' · '}
+                  <strong style={{ color: '#da291c' }}>
+                    {scopedCount} approved at {selectedVenue}
+                  </strong>
+                </>
+              )}
             </div>
           </div>
           <div
@@ -1456,6 +1621,69 @@ function UploadView({
         {/* What the parser actually read. A wrong parse looks identical to a
             right one from the brand count alone — this is the only place
             anyone can catch that before a batch runs. */}
+        {venueOptions && venueOptions.length > 0 && (
+          <div
+            style={{
+              marginTop: '18px',
+              paddingTop: '18px',
+              borderTop: '2px solid #f0f0f0',
+              textAlign: 'center',
+            }}
+          >
+            <div
+              style={{
+                fontSize: '11px',
+                fontWeight: '800',
+                color: '#999',
+                letterSpacing: '2px',
+                textTransform: 'uppercase',
+                marginBottom: '8px',
+              }}
+            >
+              Outlet for this batch
+            </div>
+            <select
+              value={selectedVenue}
+              onChange={(e) => onVenueChange(e.target.value)}
+              style={{
+                padding: '12px 16px',
+                fontSize: '15px',
+                fontWeight: '700',
+                border: `2px solid ${selectedVenue ? '#da291c' : '#ddd'}`,
+                borderRadius: '8px',
+                background: 'white',
+                color: '#1a1a1a',
+                minWidth: '320px',
+                cursor: 'pointer',
+              }}
+            >
+              <option value="">
+                All outlets — score against the whole APL
+              </option>
+              {venueOptions.map((v) => (
+                <option key={v.name} value={v.name}>
+                  {v.name} ({v.count} approved)
+                </option>
+              ))}
+            </select>
+            <div
+              style={{
+                fontSize: '12px',
+                color: '#999',
+                marginTop: '10px',
+                lineHeight: '1.6',
+                maxWidth: '620px',
+                margin: '10px auto 0',
+              }}
+            >
+              This APL marks which brands each outlet may carry. Pick the one
+              these menus belong to and only its approved brands are counted.
+              Anything on the APL but not cleared for it is reported as a
+              finding instead of an impression.
+            </div>
+          </div>
+        )}
+
         <AplReview apl={activeApl} isCustom={!!customApl} />
 
         <div
@@ -1489,10 +1717,16 @@ function UploadView({
           disabled={analyzing}
         />
 
-        <MenuNotes
+        <MenuSettings
           files={uploadedFiles}
           notes={menuNotes}
-          onChange={onNoteChange}
+          onNoteChange={onNoteChange}
+          venueOptions={venueOptions}
+          menuVenues={menuVenues}
+          venueForFile={venueForFile}
+          onMenuVenueChange={onMenuVenueChange}
+          scopeSizeFor={scopeSizeFor}
+          defaultVenue={selectedVenue}
           disabled={analyzing}
         />
 
@@ -2045,6 +2279,11 @@ function ResultsView({ results, activeApl, onNew, onExport, onExportDetail, onOp
               }}
             >
               · {activeApl.brands.length} brands
+              {results.venues && results.venues.length === 1
+                ? ` · scored for ${results.venues[0]}`
+                : results.venues && results.venues.length > 1
+                ? ` · scored across ${results.venues.length} outlets`
+                : ' · all outlets'}
             </span>
           </div>
         </div>
@@ -2781,7 +3020,7 @@ function ResultsView({ results, activeApl, onNew, onExport, onExportDetail, onOp
               }}
             >
               <FileText size={32} color="#b26a00" />
-              Not in APL ({results.offApl.length})
+              Not counted ({results.offApl.length})
             </h2>
             <p
               style={{
@@ -2791,10 +3030,23 @@ function ResultsView({ results, activeApl, onNew, onExport, onExportDetail, onOp
                 lineHeight: '1.6',
               }}
             >
-              Branded products found on the menus that aren't in the active APL.
-              These are <strong>not counted as impressions</strong> and are{' '}
-              <strong>not emailed to suppliers</strong> — listed here so you can
-              spot-check coverage and see what else each venue carries.
+              Branded products on the menus that earned no impression. None of
+              these are <strong>counted</strong> or{' '}
+              <strong>emailed to suppliers</strong>.
+              {results.venues && results.venues.length > 0 ? (
+                <>
+                  {' '}
+                  The ones marked <strong style={{ color: '#da291c' }}>
+                    not approved
+                  </strong>{' '}
+                  are on the APL but have no mark in that outlet's column —
+                  worth raising with the client, because the outlet is listing
+                  something it isn't cleared to pour. The rest aren't on the
+                  APL at all, so there's no supplier behind them to bill.
+                </>
+              ) : (
+                ' They aren\'t on the APL at all, so there is no supplier behind them to bill.'
+              )}
             </p>
             <div
               style={{
@@ -2807,8 +3059,11 @@ function ResultsView({ results, activeApl, onNew, onExport, onExportDetail, onOp
                 <div
                   key={i}
                   style={{
-                    background: '#fffdf7',
-                    border: '2px solid #ffe1a6',
+                    background: b.status === 'not-approved' ? '#fff5f5' : '#fffdf7',
+                    border:
+                      b.status === 'not-approved'
+                        ? '2px solid #f5c2c0'
+                        : '2px solid #ffe1a6',
                     borderRadius: '12px',
                     padding: '18px 20px',
                   }}
@@ -2823,6 +3078,35 @@ function ResultsView({ results, activeApl, onNew, onExport, onExportDetail, onOp
                   >
                     {b.name}
                   </div>
+                  {b.status === 'not-approved' && (
+                    <div
+                      style={{
+                        fontSize: '11px',
+                        fontWeight: '800',
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.5px',
+                        color: '#da291c',
+                        marginBottom: '6px',
+                        lineHeight: '1.5',
+                      }}
+                    >
+                      On the APL as “{b.aplName}” ({b.supplier}) — not approved
+                      at {(b.flaggedAt || []).join(', ') || 'this outlet'}
+                      {b.approvedAt && b.approvedAt.length > 0 && (
+                        <div
+                          style={{
+                            fontWeight: '600',
+                            textTransform: 'none',
+                            letterSpacing: 0,
+                            color: '#7a5200',
+                            marginTop: '2px',
+                          }}
+                        >
+                          Approved at: {b.approvedAt.join(', ')}
+                        </div>
+                      )}
+                    </div>
+                  )}
                   {b.category && (
                     <div
                       style={{
@@ -3920,17 +4204,36 @@ function extractFirstJsonObject(s) {
 // ---------------------------------------------------------------------------
 
 function aggregateOffApl(menuAnalyses, activeApl) {
-  const map = {}; // lowercased name -> { name, category, locations:{loc:count}, total }
+  const allBrands = activeApl?.brands || [];
+
+  // One scoped list per outlet in the batch, built once. A menu is judged
+  // against ITS outlet, not against whatever the batch defaulted to.
+  const scopeCache = new Map();
+  const scopeFor = (venue) => {
+    if (!scopeCache.has(venue)) {
+      scopeCache.set(venue, filterAplByVenue(allBrands, venue));
+    }
+    return scopeCache.get(venue);
+  };
+
+  const map = {}; // lowercased name -> aggregate
 
   menuAnalyses.forEach((menu) => {
     const list = menu.off_apl_brands || menu.off_apl || [];
     if (!Array.isArray(list)) return;
+
+    const venue = menu.venue || '';
+    const scoped = scopeFor(venue);
 
     list.forEach((entry) => {
       const name = (
         typeof entry === 'string' ? entry : entry?.name || ''
       ).trim();
       if (!name) return;
+
+      // Already counted on this menu — the model reports a brand it does not
+      // recognise, and a rewording of something in scope is not a finding.
+      if (matchesAplBrand(name, scoped)) return;
 
       const key = name.toLowerCase();
       const category =
@@ -3941,22 +4244,51 @@ function aggregateOffApl(menuAnalyses, activeApl) {
           : 1;
 
       if (!map[key]) {
-        map[key] = { name, category, locations: {}, total: 0 };
+        // Two different findings share this bucket, and the client needs a
+        // different answer to each:
+        //
+        //   not-approved — on the APL, but with no mark in the column for the
+        //                  outlet this menu belongs to. Earns no impression,
+        //                  and is worth raising: the outlet is listing
+        //                  something it is not cleared to pour.
+        //   off-apl      — not on the APL anywhere. No supplier relationship
+        //                  behind it, so nothing to bill and nothing to
+        //                  enforce. Usually a local brand left off on purpose.
+        const onFullApl = venue ? matchesAplBrand(name, allBrands) : null;
+        map[key] = {
+          name,
+          category,
+          locations: {},
+          total: 0,
+          status: onFullApl ? 'not-approved' : 'off-apl',
+          ...(onFullApl
+            ? {
+                aplName: onFullApl.name,
+                supplier: onFullApl.supplier,
+                approvedAt: onFullApl.venues || [],
+                flaggedAt: new Set(),
+              }
+            : {}),
+        };
       }
-      map[key].total += hits;
-      map[key].locations[menu.location] =
-        (map[key].locations[menu.location] || 0) + hits;
-      if (!map[key].category && category) map[key].category = category;
+
+      const rec = map[key];
+      rec.total += hits;
+      rec.locations[menu.location] = (rec.locations[menu.location] || 0) + hits;
+      if (!rec.category && category) rec.category = category;
+      if (rec.flaggedAt && venue) rec.flaggedAt.add(venue);
     });
   });
 
-  // Drop anything that is actually an APL brand written differently. It's
-  // already counted in brand_impressions, so leaving it here would show the
-  // same product as both billed and "not in APL" on the same report.
-  const aplBrands = activeApl?.brands || [];
   return Object.values(map)
-    .filter((entry) => !matchesAplBrand(entry.name, aplBrands))
-    .sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+    .map((r) =>
+      r.flaggedAt ? { ...r, flaggedAt: [...r.flaggedAt] } : r
+    )
+    .sort(
+      (a, b) =>
+        (a.status === b.status ? 0 : a.status === 'not-approved' ? -1 : 1) ||
+        a.name.toLowerCase().localeCompare(b.name.toLowerCase())
+    );
 }
 
 // ---------------------------------------------------------------------------
