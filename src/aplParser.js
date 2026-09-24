@@ -84,10 +84,43 @@ export function tokensMatch(a, b) {
 const seqMatch = (a, b) =>
   a.length === b.length && a.every((t, i) => tokensMatch(t, b[i]));
 
+// Every word, with nothing stripped. Descriptor stripping is what lets
+// "Aperol Apertivo" find "Aperol", but it also erases the only difference
+// between two real products: "Q Ginger Ale" and "Q Ginger Beer" both reduce
+// to ["q","ginger"], so a menu listing the ale was billed as the beer. So we
+// look for an exact, unstripped match first and only loosen if nothing fits.
+function rawTokens(raw) {
+  return String(raw || '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\([^)]*\)/g, ' ')
+    .toLowerCase()
+    .replace(/['\u2018\u2019]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .split(' ')
+    .filter(Boolean);
+}
+
 export function matchesAplBrand(offName, aplBrands) {
   const off = offAplTokens(offName);
   if (off.length === 0) return null;
   const list = aplBrands || [];
+
+  // 0. Word-for-word, nothing stripped. Wins outright when it hits, so a
+  //    product is never absorbed by a sibling that differs only in a word
+  //    the descriptor list happens to cover.
+  const raw = rawTokens(offName);
+  if (raw.length) {
+    for (const b of list) {
+      if (seqMatch(raw, rawTokens(b.name))) return b;
+    }
+    for (const b of list) {
+      if (!b.category) continue;
+      const combined = [...rawTokens(b.name), ...rawTokens(b.category)];
+      if (combined.length && seqMatch(raw, combined)) return b;
+    }
+  }
 
   // 1. Exact token sequence against the APL name.
   //
@@ -222,8 +255,7 @@ export function canonicalizeBrand(reported, aplBrands) {
   // Display form drops any trailing region/style parenthetical, matching the
   // naming rule the prompt already gives the model: "Jameson (Irish)" reads
   // as "Jameson".
-  const display = (b) =>
-    String(b.name).replace(/\s*\([^)]*\)\s*$/, '').trim() || String(b.name);
+  const display = (b) => aplDisplayName(b);
 
   if (sameLength.length === 1) return display(sameLength[0].brand);
   if (sameLength.length > 1) return raw; // ambiguous — leave it alone
@@ -430,6 +462,10 @@ export function parseXlsxApl(workbook) {
       console.log(`[APL] flat pass, "${sheetName}": +${added} brands`);
     }
   }
+
+  const unified = unifySupplierSpellings(merged);
+  merged.length = 0;
+  merged.push(...unified);
 
   console.log(`[APL] TOTAL: ${merged.length} brands`);
   // Ctrl-F this line in the console to check whether a specific brand made it
@@ -988,6 +1024,39 @@ export function reviewApl(brands) {
     });
   }
 
+  // Near-miss supplier names. Accented and spacing variants are already
+  // merged by unifySupplierSpellings; what is left is a genuine typo, and
+  // merging those automatically would decide who gets invoiced. So it is
+  // raised for a person: "FIFTH GENERATON" and "FIFTH GENERATION" differ by
+  // one letter and split Tito's from LALO Blanco across two reports.
+  const supplierCounts = new Map();
+  for (const b of list) {
+    const k = supplierKey(b.supplier);
+    if (k) supplierCounts.set(k, (supplierCounts.get(k) || 0) + 1);
+  }
+  const supplierKeys = [...supplierCounts.keys()];
+  const nearPairs = [];
+  for (let i = 0; i < supplierKeys.length; i++) {
+    for (let j = i + 1; j < supplierKeys.length; j++) {
+      const a = supplierKeys[i];
+      const b = supplierKeys[j];
+      if (Math.min(a.length, b.length) < 6) continue;
+      if (editDistance(a, b) > 2) continue;
+      nearPairs.push(
+        `"${a}" (${supplierCounts.get(a)}) vs "${b}" (${supplierCounts.get(b)})`
+      );
+    }
+  }
+  if (nearPairs.length) {
+    warnings.push({
+      kind: 'supplier-typo',
+      text: `${nearPairs.length} pair${
+        nearPairs.length === 1 ? '' : 's'
+      } of supplier names differ by a letter or two. If they are the same company, that company gets two separate reports — fix the spelling in the APL.`,
+      examples: nearPairs.slice(0, 3),
+    });
+  }
+
   const noSupplier = list.filter(
     (b) => !b.supplier || b.supplier === 'UNKNOWN'
   );
@@ -1039,4 +1108,94 @@ export function approvedAtVenue(brand, venue) {
 export function filterAplByVenue(brands, venue) {
   if (!venue) return brands || [];
   return (brands || []).filter((b) => approvedAtVenue(b, venue));
+}
+
+
+// ---------------------------------------------------------------------------
+// Supplier names, and wine display names.
+// ---------------------------------------------------------------------------
+
+// Two spellings of one company split its report in half. The OHM sheet writes
+// BACARDÍ for eleven brands and BACARDI for St-Germain, and RÉMY COINTREAU
+// both with and without the accent — so Bacardi would receive two emails,
+// each listing part of their range.
+//
+// Accents, case, punctuation and spacing are safe to collapse: nothing is
+// lost and no two real companies differ only that way. A genuine typo
+// ("FIFTH GENERATON" for "FIFTH GENERATION") is NOT merged here, because
+// guessing that two differently-spelled names are one company decides who
+// gets invoiced. Those are surfaced by reviewApl instead, for a person.
+export function supplierKey(name) {
+  return String(name || '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, ' ')
+    .trim();
+}
+
+export function unifySupplierSpellings(brands) {
+  const counts = new Map(); // key -> Map(spelling -> n)
+  for (const b of brands || []) {
+    const k = supplierKey(b.supplier);
+    if (!k) continue;
+    if (!counts.has(k)) counts.set(k, new Map());
+    const m = counts.get(k);
+    m.set(b.supplier, (m.get(b.supplier) || 0) + 1);
+  }
+  // The spelling used most often wins; ties go to the longer one, which keeps
+  // the accented form rather than the stripped one.
+  const canonical = new Map();
+  for (const [k, m] of counts) {
+    let best = null;
+    for (const [spelling, n] of m) {
+      if (!best || n > best.n || (n === best.n && spelling.length > best.spelling.length)) {
+        best = { spelling, n };
+      }
+    }
+    canonical.set(k, best.spelling);
+  }
+  let changed = 0;
+  const out = (brands || []).map((b) => {
+    const want = canonical.get(supplierKey(b.supplier));
+    if (want && want !== b.supplier) {
+      changed++;
+      return { ...b, supplier: want };
+    }
+    return b;
+  });
+  if (changed) {
+    console.log(`[APL] unified ${changed} supplier spelling(s)`);
+  }
+  return out;
+}
+
+// Wine APLs split winery and grape across two columns. A supplier is paying
+// for specific bottles, so each wine is reported on its own line: the grape
+// is part of the product name, not a footnote. Spirits and beer are left
+// alone — "Grey Goose" is not "Grey Goose Vodka".
+const WINE_VARIETALS = new Set([
+  'chardonnay', 'cabernet sauvignon', 'cab sauv', 'sauvignon blanc',
+  'sauv blanc', 'pinot noir', 'pinot grigio', 'pinot gris', 'merlot',
+  'malbec', 'zinfandel', 'syrah', 'shiraz', 'riesling', 'moscato',
+  'tempranillo', 'sangiovese', 'grenache', 'glera', 'red blend',
+  'white blend', 'rose', 'rosé', 'still rosé', 'sparkling', 'prosecco',
+  'champagne', 'brut', 'bubbles',
+]);
+
+export function isVarietal(category) {
+  return WINE_VARIETALS.has(String(category || '').trim().toLowerCase());
+}
+
+// How an APL row should be named everywhere the user sees it: in the list
+// sent to the model, on the report, and in the CSV exports.
+export function aplDisplayName(brand) {
+  const base = String(brand?.name || '').replace(/\s*\([^)]*\)\s*$/, '').trim()
+    || String(brand?.name || '');
+  if (!isVarietal(brand?.category)) return base;
+  // Don't double up when the winery name already carries the grape.
+  const b = base.toLowerCase();
+  const c = String(brand.category).toLowerCase();
+  if (b.includes(c)) return base;
+  return `${base} ${brand.category}`.replace(/\s+/g, ' ').trim();
 }
