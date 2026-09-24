@@ -880,10 +880,41 @@ ONLY respond with JSON — no commentary before or after it. Include the "cockta
     }
 
     const data = await response.json();
-    const text = data.content
+    const blocks = Array.isArray(data.content) ? data.content : [];
+    const text = blocks
       .filter((item) => item.type === 'text')
       .map((item) => item.text)
       .join('\n');
+
+    // An empty `text` used to fall through to parseClaudeJson, which reported
+    // 'No parseable JSON object found... Started with: ""'. That message named
+    // the symptom and hid the cause: the request SUCCEEDED (HTTP 200) and the
+    // response simply contained no text block for us to read.
+    //
+    // There are only a few ways that happens, and they need opposite fixes, so
+    // report which one it was instead of guessing:
+    //   stop_reason 'max_tokens' + a thinking block  -> the reasoning consumed
+    //       the whole budget before any answer was written. Raise max_tokens.
+    //   stop_reason 'refusal' / 'pause_turn'         -> the model declined or
+    //       paused. A menu problem, not a code problem.
+    //   only a thinking block, stop_reason 'end_turn'-> the model reasoned and
+    //       then said nothing. Prompt problem.
+    //   no blocks at all                             -> the proxy is reshaping
+    //       the response. A Railway problem, not an Anthropic one.
+    if (!text.trim()) {
+      const shape = blocks.length
+        ? blocks
+            .map((b) => `${b.type}(${JSON.stringify(b).length}b)`)
+            .join(', ')
+        : 'no content blocks';
+      const usage = data.usage
+        ? ` in=${data.usage.input_tokens} out=${data.usage.output_tokens}`
+        : '';
+      throw new Error(
+        `Model returned no text. stop_reason=${data.stop_reason || 'none'}; ` +
+          `blocks=[${shape}];${usage} model=${data.model || 'unknown'}`
+      );
+    }
 
     // Robust parse. The old code did a single JSON.parse on the whole string,
     // which throws "unexpected non-whitespace character after JSON data" the
