@@ -234,6 +234,24 @@ export function canonicalizeBrand(reported, aplBrands) {
     if (best.length === 1) return display(best[0].brand);
   }
 
+  // The reported name is SHORTER than the APL's, and only one entry extends
+  // it. One bar book came back with "Fireball" and the next with "Fireball
+  // Cinnamon" — the same product, landing as two rows and splitting Sazerac's
+  // count across a batch. Same uniqueness and distinctiveness guards as the
+  // matcher, so "Milagro" stays as written rather than guessing Silver or
+  // Reposado, and a garnish never resolves to a brand.
+  if (distinctiveEnoughAlone(tokens)) {
+    const extends_ = aplBrands.filter((b) => {
+      const aplTokens = offAplTokens(b.name);
+      return (
+        aplTokens.length > tokens.length &&
+        tokens.every((t, i) => tokensMatch(t, aplTokens[i]))
+      );
+    });
+    const distinct = new Set(extends_.map((b) => b.name.toLowerCase()));
+    if (distinct.size === 1) return display(extends_[0]);
+  }
+
   return raw;
 }
 
