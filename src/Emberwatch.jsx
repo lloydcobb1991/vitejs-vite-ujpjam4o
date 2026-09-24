@@ -616,7 +616,31 @@ below.
         // the batch fails. The knob is gone at the model level, so consistency
         // now has to come from the prompt and from the second-pass checklist,
         // not from a sampling setting.
-        max_tokens: 16000,
+
+        // Sonnet 5 reasons before it answers, and max_tokens caps THINKING PLUS
+        // ANSWER together (the API reports thinking_tokens as a subset of
+        // output_tokens). At 16000 the Acacia bar book spent the entire budget
+        // reasoning and never wrote the report: stop_reason=max_tokens,
+        // blocks=[thinking(44600b)], in=19706 out=16000. The run looked like a
+        // parser bug and was actually a budget problem.
+        //
+        // 32000 leaves room for a long reasoning pass AND a full report. The
+        // biggest reports we produce run well under 16000 on their own, so the
+        // answer half has roughly the whole old budget to itself.
+        max_tokens: 32000,
+
+        // How hard it reasons before answering. 'medium' is a deliberate middle:
+        // the failure we are chasing is missed sections of printed product
+        // lists, which is an attention problem that reasoning genuinely helps,
+        // so throttling to 'low' would work against us. But effort spends the
+        // same budget the report needs, so 'high'/'xhigh'/'max' raise the risk
+        // of the exact truncation above on a long bar book.
+        //
+        // If runs come back truncated again, LOWER this before raising
+        // max_tokens further — the diagnostic below will say which it was.
+        output_config: {
+          effort: 'medium',
+        },
         messages: [
           {
             role: 'user',
@@ -913,6 +937,21 @@ ONLY respond with JSON — no commentary before or after it. Include the "cockta
       throw new Error(
         `Model returned no text. stop_reason=${data.stop_reason || 'none'}; ` +
           `blocks=[${shape}];${usage} model=${data.model || 'unknown'}`
+      );
+    }
+
+    // Truncation with SOME text is the nastier cousin of the case above: the
+    // report starts, the budget runs out mid-JSON, and parseClaudeJson reports
+    // a syntax error that reads like the model produced malformed output. Catch
+    // it here while we still know the real reason, because a half-written report
+    // must never be treated as a complete count — the missing tail would look
+    // exactly like products that aren't on the menu.
+    if (data.stop_reason === 'max_tokens') {
+      throw new Error(
+        `Report was cut off — hit the ${
+          data.usage ? data.usage.output_tokens : 'max'
+        }-token output limit mid-answer, so the count is incomplete. ` +
+          `Raise max_tokens or lower output_config.effort in Emberwatch.jsx.`
       );
     }
 
