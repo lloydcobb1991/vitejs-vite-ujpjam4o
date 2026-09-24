@@ -26,6 +26,7 @@ import {
   parseXlsxApl,
   aplVenues,
   filterAplByVenue,
+  aplDisplayName,
 } from './aplParser';
 
 // ---------------------------------------------------------------------------
@@ -179,6 +180,12 @@ export default function Emberwatch() {
   // exceptions — but OHM alone has eleven outlets, and a 38-menu batch
   // spans several, so one venue for a whole run is not good enough.
   const [menuVenues, setMenuVenues] = useState({});
+  // Flagged products a person has decided SHOULD count after all — usually
+  // because the APL's venue column is out of date rather than the menu being
+  // wrong. Keyed by brand name. Every one is recorded on the exports and the
+  // emails, because a hand-made change to a billed number has to be visible
+  // to whoever reads it later.
+  const [included, setIncluded] = useState(() => new Set());
   const venueForFile = (fileName) =>
     Object.prototype.hasOwnProperty.call(menuVenues, fileName)
       ? menuVenues[fileName]
@@ -318,9 +325,18 @@ export default function Emberwatch() {
         const file = uploadedFiles[i];
         const label = `${file.name} (${i + 1}/${uploadedFiles.length})`;
 
-        // Each menu is scored against its OWN outlet's list. A batch that
-        // spans outlets used to be impossible to run correctly: one selector
-        // meant either the wrong scope for most menus, or no scope at all.
+        // Each menu belongs to its OWN outlet. A batch that spans outlets
+        // used to be impossible to run correctly: one selector meant either
+        // the wrong scope for most menus, or no scope at all.
+        //
+        // The model is shown the WHOLE APL and asked to find everything. The
+        // outlet decision is then made here, in code, against the venue
+        // columns. Sending only the outlet's subset looked tidier and was
+        // quietly wrong: a brand outside the subset was invisible to the
+        // model unless it chose to volunteer it as an unknown product, and
+        // on the Solstice bar book it volunteered 8 of the 18 that were
+        // actually off-limits at Cambria Mesa. Ten real findings — most of
+        // the wine list — simply never appeared.
         const fileVenue = venueForFile(file.name);
         const fileBrands = filterAplByVenue(activeApl.brands, fileVenue);
 
@@ -347,13 +363,48 @@ export default function Emberwatch() {
                 name: file.name,
                 base64: chunks[c],
                 note: (menuNotes[file.name] || '').trim(),
-                brands: fileBrands,
+                brands: activeApl.brands,
               })
             );
           }
 
-          const analysis =
+          const rawAnalysis =
             parts.length === 1 ? parts[0] : mergeChunkAnalyses(parts);
+
+          // Split what the model found into what this outlet may pour and
+          // what it may not. The not-approved half keeps the cocktails and
+          // lists it appeared in, so the report can say where it was seen.
+          const approvedImpressions = {};
+          const notApproved = [];
+          Object.entries(rawAnalysis.brand_impressions || {}).forEach(
+            ([reported, data]) => {
+              if (!fileVenue) {
+                approvedImpressions[reported] = data;
+                return;
+              }
+              const hit = matchesAplBrand(reported, fileBrands);
+              if (hit) {
+                approvedImpressions[reported] = data;
+                return;
+              }
+              const onFullApl = matchesAplBrand(reported, activeApl.brands);
+              notApproved.push({
+                name: canonicalizeBrand(reported, activeApl.brands),
+                category: onFullApl?.category || '',
+                supplier: onFullApl?.supplier || data.supplier || '',
+                aplName: onFullApl?.name || reported,
+                approvedAt: onFullApl?.venues || [],
+                where: Array.isArray(data.cocktails) ? data.cocktails : [],
+                count: data.count || 0,
+              });
+            }
+          );
+
+          const analysis = {
+            ...rawAnalysis,
+            brand_impressions: approvedImpressions,
+            not_approved: notApproved,
+          };
 
           menuAnalyses.push({
             location: resolveLocation(file.name),
@@ -411,6 +462,7 @@ export default function Emberwatch() {
       const aggregated = aggregateBySupplier(menuAnalyses);
       const offApl = aggregateOffApl(menuAnalyses, activeApl);
 
+      setIncluded(new Set());
       setResults({
         menuAnalyses,
         aggregated,
@@ -464,13 +516,20 @@ export default function Emberwatch() {
     const ambiguousAplNames = ambiguousAplNamesFor(brands);
     const brandList = brands
       .map((b) => {
-        // Only surface the category when it actually disambiguates. Tagging
-        // every line adds noise; tagging the collisions is what stops
+        // Wines are named winery-plus-grape here, the same way they will be
+        // named on the report, because a supplier is paying for specific
+        // bottles being listed. Sending the bare winery let the model report
+        // "Bonanza" on one menu and "Hayes Ranch Pinot Noir" on the next.
+        const shown = aplDisplayName(b);
+        // Otherwise only surface the category when it actually disambiguates.
+        // Tagging every line adds noise; tagging the collisions is what stops
         // "New Amsterdam Gin" being read as a non-APL product.
-        const dupe = ambiguousAplNames.has(b.name.trim().toLowerCase());
+        const dupe =
+          shown === b.name.trim() &&
+          ambiguousAplNames.has(b.name.trim().toLowerCase());
         return dupe && b.category
-          ? `- ${b.name} [${b.category}] (${b.supplier})`
-          : `- ${b.name} (${b.supplier})`;
+          ? `- ${shown} [${b.category}] (${b.supplier})`
+          : `- ${shown} (${b.supplier})`;
       })
       .join('\n');
 
@@ -791,6 +850,54 @@ ONLY respond with JSON — no commentary before or after it. Include the "cockta
     return parseClaudeJson(text);
   };
 
+  // Fold any hand-approved products back into the counted side and redo the
+  // totals. Kept as a derivation rather than an edit to `results`, so the
+  // original machine answer is never overwritten and unticking a box puts
+  // everything back exactly as it was.
+  const displayResults = React.useMemo(() => {
+    if (!results) return results;
+    if (included.size === 0) {
+      return { ...results, includedNames: [] };
+    }
+    const menuAnalyses = results.menuAnalyses.map((menu) => {
+      const promote = (menu.not_approved || []).filter((e) =>
+        included.has(e.name)
+      );
+      if (promote.length === 0) return menu;
+      const brand_impressions = { ...(menu.brand_impressions || {}) };
+      promote.forEach((e) => {
+        const prior = brand_impressions[e.name];
+        brand_impressions[e.name] = {
+          count: (prior?.count || 0) + (e.count || 0),
+          supplier: e.supplier || prior?.supplier || 'UNKNOWN',
+          cocktails: [...(prior?.cocktails || []), ...(e.where || [])],
+        };
+      });
+      return {
+        ...menu,
+        brand_impressions,
+        not_approved: (menu.not_approved || []).filter(
+          (e) => !included.has(e.name)
+        ),
+      };
+    });
+    return {
+      ...results,
+      menuAnalyses,
+      aggregated: aggregateBySupplier(menuAnalyses),
+      offApl: aggregateOffApl(menuAnalyses, activeApl),
+      includedNames: [...included],
+    };
+  }, [results, included, activeApl]);
+
+  const toggleIncluded = (name) =>
+    setIncluded((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+
   // Which group a menu belongs to. Defaults to a tidied filename, but the
   // label the user typed on the upload screen always wins. Grouping is
   // deliberately free text: reports go out per property most of the time, but
@@ -855,7 +962,8 @@ ONLY respond with JSON — no commentary before or after it. Include the "cockta
   };
 
   const exportToCSV = () => {
-    if (!results) return;
+    const view = displayResults;
+    if (!view) return;
 
     const rows = [];
 
@@ -863,7 +971,7 @@ ONLY respond with JSON — no commentary before or after it. Include the "cockta
     // fixed list of cities. The old header was hard-coded to NYC / Las Vegas /
     // Washington DC, so every other client exported a wall of zeros next to a
     // correct total.
-    const groups = [...new Set(results.menuAnalyses.map((m) => m.location))]
+    const groups = [...new Set(view.menuAnalyses.map((m) => m.location))]
       .filter(Boolean)
       .sort((a, b) => a.localeCompare(b));
 
@@ -871,7 +979,7 @@ ONLY respond with JSON — no commentary before or after it. Include the "cockta
     // drinks menu and a banquet playbook is still one property — so sum across
     // every menu in the group rather than taking the first match.
     const countForGroup = (group, brand) =>
-      results.menuAnalyses
+      view.menuAnalyses
         .filter((m) => m.location === group)
         .reduce((n, m) => n + findMenuBrandCount(m, brand), 0);
 
@@ -882,7 +990,7 @@ ONLY respond with JSON — no commentary before or after it. Include the "cockta
 
     rows.push(['Supplier', 'Brand', ...groups, 'Total']);
 
-    results.aggregated.forEach((supplier) => {
+    view.aggregated.forEach((supplier) => {
       Object.entries(supplier.brands).forEach(([brand, totalCount]) => {
         rows.push([
           supplier.supplier,
@@ -895,11 +1003,18 @@ ONLY respond with JSON — no commentary before or after it. Include the "cockta
 
     // Off-APL brands (informational — not billed). Appended as a clearly
     // separated block so it can't be confused with the impression rows above.
-    if (results.offApl && results.offApl.length > 0) {
+    if (view.offApl && view.offApl.length > 0) {
       rows.push([]);
       rows.push(['NOT COUNTED (for review — not billed, not emailed)']);
-      rows.push(['Brand', 'Category', 'Why not counted', 'Locations', 'Mentions']);
-      results.offApl.forEach((b) => {
+      rows.push([
+        'Brand',
+        'Category',
+        'Why not counted',
+        'Locations',
+        'Listed in',
+        'Mentions',
+      ]);
+      view.offApl.forEach((b) => {
         const locs = Object.entries(b.locations)
           .map(([loc, c]) => `${loc} (${c})`)
           .join('; ');
@@ -910,11 +1025,18 @@ ONLY respond with JSON — no commentary before or after it. Include the "cockta
               }`
             : 'Not on the APL';
         // Quote the free-text fields so any stray commas don't break columns.
+        const where = Object.entries(b.contexts || {})
+          .map(([loc, list]) =>
+            list.length ? `${loc}: ${list.join('; ')}` : ''
+          )
+          .filter(Boolean)
+          .join(' | ');
         rows.push([
           csvCell(b.name),
           csvCell(b.category || ''),
           csvCell(why),
           csvCell(locs),
+          csvCell(where),
           b.total,
         ]);
       });
@@ -947,7 +1069,8 @@ ONLY respond with JSON — no commentary before or after it. Include the "cockta
   // glued to the cocktail name.
   // ---------------------------------------------------------------------
   const exportDetailCSV = () => {
-    if (!results) return;
+    const view = displayResults;
+    if (!view) return;
 
     const csvCell = (v) => {
       const t = String(v ?? '');
@@ -1041,7 +1164,7 @@ ONLY respond with JSON — no commentary before or after it. Include the "cockta
       return hit?.category || '';
     };
 
-    results.menuAnalyses.forEach((menu) => {
+    view.menuAnalyses.forEach((menu) => {
       Object.entries(menu.brand_impressions || {}).forEach(([brand, data]) => {
         const supplier = data.supplier || 'UNKNOWN';
         const canonical = canonicalizeBrand(brand, activeApl.brands);
@@ -1095,7 +1218,7 @@ ONLY respond with JSON — no commentary before or after it. Include the "cockta
     const detailTotal = rows
       .slice(1)
       .reduce((n, r) => n + (Number(r[7]) || 0), 0);
-    const summaryTotal = results.aggregated.reduce((n, sup) => n + sup.total, 0);
+    const summaryTotal = view.aggregated.reduce((n, sup) => n + sup.total, 0);
     const reconciled = detailTotal === summaryTotal;
     if (!reconciled) {
       console.warn(
@@ -1113,14 +1236,14 @@ ONLY respond with JSON — no commentary before or after it. Include the "cockta
     // Any operator note that shaped this run, reproduced word for word. This
     // is the whole reason the note field is safe to have: a number you cannot
     // explain is worse than a number you did not get.
-    const noted = results.menuAnalyses.filter((m) => (m.note || '').trim());
-    const scopedMenus = results.menuAnalyses.filter((m) => m.venue);
+    const noted = view.menuAnalyses.filter((m) => (m.note || '').trim());
+    const scopedMenus = view.menuAnalyses.filter((m) => m.venue);
     const venueRows = scopedMenus.length
       ? [
           [],
           ['OUTLET EACH MENU WAS SCORED FOR'],
           ['Menu file', 'Outlet', 'Brands in scope'],
-          ...results.menuAnalyses.map((m) => [
+          ...view.menuAnalyses.map((m) => [
             csvCell(m.filename),
             csvCell(m.venue || 'All outlets — whole APL'),
             m.scopeSize ?? '',
@@ -1137,8 +1260,20 @@ ONLY respond with JSON — no commentary before or after it. Include the "cockta
         ]
       : [];
 
+    // A hand-made change to a billed number has to travel with the number.
+    const includedRows =
+      view.includedNames && view.includedNames.length
+        ? [
+            [],
+            ['COUNTED BY HAND (not approved at the outlet, included anyway)'],
+            ['Brand'],
+            ...view.includedNames.map((n) => [csvCell(n)]),
+          ]
+        : [];
+
     const footer = [
       ...venueRows,
+      ...includedRows,
       ...noteRows,
       [],
       [
@@ -1221,7 +1356,9 @@ ONLY respond with JSON — no commentary before or after it. Include the "cockta
 
       {view === 'results' && results && (
         <ResultsView
-          results={results}
+          results={displayResults}
+          included={included}
+          onToggleIncluded={toggleIncluded}
           activeApl={activeApl}
           onNew={() => {
             setResults(null);
@@ -1236,7 +1373,7 @@ ONLY respond with JSON — no commentary before or after it. Include the "cockta
 
       {view === 'email' && results && (
         <EmailReportView
-          results={results}
+          results={displayResults}
           activeApl={activeApl}
           onBack={() => setView('results')}
         />
@@ -2114,7 +2251,16 @@ function cleanIssueContext(raw) {
 // Results view
 // ===========================================================================
 
-function ResultsView({ results, activeApl, onNew, onExport, onExportDetail, onOpenEmail }) {
+function ResultsView({
+  results,
+  activeApl,
+  included,
+  onToggleIncluded,
+  onNew,
+  onExport,
+  onExportDetail,
+  onOpenEmail,
+}) {
   const [newsStatus, setNewsStatus] = useState('idle'); // idle|loading|done|error
   const [news, setNews] = useState(null);
   const [newsError, setNewsError] = useState(null);
@@ -3039,6 +3185,27 @@ function ResultsView({ results, activeApl, onNew, onExport, onExportDetail, onOp
               <FileText size={32} color="#b26a00" />
               Not counted ({results.offApl.length})
             </h2>
+            {results.includedNames && results.includedNames.length > 0 && (
+              <div
+                style={{
+                  background: '#f0f9f4',
+                  border: '2px solid #28a745',
+                  borderRadius: '10px',
+                  padding: '14px 18px',
+                  marginBottom: '18px',
+                  fontSize: '14px',
+                  color: '#1a7a33',
+                  fontWeight: '700',
+                  lineHeight: '1.6',
+                }}
+              >
+                {results.includedNames.length} product
+                {results.includedNames.length === 1 ? '' : 's'} counted by hand
+                and moved into the report above:{' '}
+                {results.includedNames.join(', ')}. Each one is named on the
+                exports and on the supplier emails.
+              </div>
+            )}
             <p
               style={{
                 fontSize: '15px',
@@ -3096,6 +3263,49 @@ function ResultsView({ results, activeApl, onNew, onExport, onExportDetail, onOp
                     {b.name}
                   </div>
                   {b.status === 'not-approved' && (
+                    <label
+                      style={{
+                        display: 'flex',
+                        alignItems: 'flex-start',
+                        gap: '8px',
+                        cursor: 'pointer',
+                        background: 'white',
+                        border: '1px solid #f0c9c7',
+                        borderRadius: '8px',
+                        padding: '8px 10px',
+                        marginBottom: '8px',
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={included?.has(b.name) || false}
+                        onChange={() => onToggleIncluded(b.name)}
+                        style={{ marginTop: '2px', cursor: 'pointer' }}
+                      />
+                      <span
+                        style={{
+                          fontSize: '12px',
+                          fontWeight: '700',
+                          color: '#1a1a1a',
+                          lineHeight: '1.5',
+                        }}
+                      >
+                        Count it anyway
+                        <span
+                          style={{
+                            display: 'block',
+                            fontWeight: '500',
+                            color: '#999',
+                          }}
+                        >
+                          Moves it up into {b.supplier}'s impressions. Use when
+                          the APL's outlet column is out of date, not when the
+                          menu is wrong.
+                        </span>
+                      </span>
+                    </label>
+                  )}
+                  {b.status === 'not-approved' && (
                     <div
                       style={{
                         fontSize: '11px',
@@ -3138,28 +3348,44 @@ function ResultsView({ results, activeApl, onNew, onExport, onExportDetail, onOp
                       {b.category}
                     </div>
                   )}
-                  <div
-                    style={{
-                      display: 'flex',
-                      flexWrap: 'wrap',
-                      gap: '6px',
-                    }}
-                  >
-                    {Object.entries(b.locations).map(([loc, count]) => (
-                      <span
-                        key={loc}
-                        style={{
-                          fontSize: '12px',
-                          fontWeight: '700',
-                          color: '#7a5200',
-                          background: '#fff3d6',
-                          borderRadius: '20px',
-                          padding: '4px 12px',
-                        }}
-                      >
-                        {loc}: {count}
-                      </span>
-                    ))}
+                  {/* Where it actually appears. The first question anyone
+                      asks about a flagged product is which drinks list it,
+                      and the model already tells us — we were throwing it
+                      away. Covers spirits, wine, beer and non-alc alike. */}
+                  <div style={{ display: 'grid', gap: '6px' }}>
+                    {Object.entries(b.locations).map(([loc, count]) => {
+                      const where = (b.contexts && b.contexts[loc]) || [];
+                      return (
+                        <div key={loc}>
+                          <span
+                            style={{
+                              fontSize: '12px',
+                              fontWeight: '700',
+                              color: '#7a5200',
+                              background: '#fff3d6',
+                              borderRadius: '20px',
+                              padding: '4px 12px',
+                              display: 'inline-block',
+                            }}
+                          >
+                            {loc}: {count}
+                          </span>
+                          {where.length > 0 && (
+                            <div
+                              style={{
+                                fontSize: '12px',
+                                color: '#666',
+                                lineHeight: '1.6',
+                                marginTop: '4px',
+                                paddingLeft: '4px',
+                              }}
+                            >
+                              {where.join(' · ')}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               ))}
@@ -4220,87 +4446,98 @@ function extractFirstJsonObject(s) {
 // purely as a manual-review aid ("what else is this venue carrying?").
 // ---------------------------------------------------------------------------
 
+// Strip the surface tag the model appends — "Negroni (image text)" — so a
+// drink is named once however many surfaces it appeared on.
+function cleanContext(raw) {
+  return String(raw || '')
+    .replace(
+      /\s*\((image|image text|title|img|photo|caption|recipe|recipe ingredient|ingredient)\b[^)]*\)\s*$/i,
+      ''
+    )
+    .trim();
+}
+
 function aggregateOffApl(menuAnalyses, activeApl) {
   const allBrands = activeApl?.brands || [];
-
-  // One scoped list per outlet in the batch, built once. A menu is judged
-  // against ITS outlet, not against whatever the batch defaulted to.
-  const scopeCache = new Map();
-  const scopeFor = (venue) => {
-    if (!scopeCache.has(venue)) {
-      scopeCache.set(venue, filterAplByVenue(allBrands, venue));
-    }
-    return scopeCache.get(venue);
-  };
-
   const map = {}; // lowercased name -> aggregate
 
+  const bucket = (name, seed) => {
+    const key = name.toLowerCase();
+    if (!map[key]) {
+      map[key] = {
+        name,
+        category: '',
+        locations: {},
+        contexts: {},   // location -> Set of drink / list names
+        total: 0,
+        ...seed,
+      };
+    }
+    return map[key];
+  };
+
+  const record = (rec, menu, where, hits) => {
+    rec.total += hits;
+    rec.locations[menu.location] = (rec.locations[menu.location] || 0) + hits;
+    if (!rec.contexts[menu.location]) rec.contexts[menu.location] = new Set();
+    (where || []).forEach((w) => {
+      const c = cleanContext(w);
+      if (c) rec.contexts[menu.location].add(c);
+    });
+  };
+
   menuAnalyses.forEach((menu) => {
+    const venue = menu.venue || '';
+
+    // ---- On the APL, but not cleared for this outlet. ----
+    // Worked out in code from the venue columns, so it does not depend on
+    // the model volunteering anything. These carry the drinks they were
+    // found in, because "where is it listed" is the first thing anyone asks.
+    (menu.not_approved || []).forEach((entry) => {
+      const name = String(entry?.name || '').trim();
+      if (!name) return;
+      const rec = bucket(name, {
+        status: 'not-approved',
+        aplName: entry.aplName,
+        supplier: entry.supplier,
+        approvedAt: entry.approvedAt || [],
+        flaggedAt: new Set(),
+      });
+      if (!rec.category && entry.category) rec.category = entry.category;
+      if (rec.flaggedAt && venue) rec.flaggedAt.add(venue);
+      record(rec, menu, entry.where, entry.count || (entry.where || []).length || 1);
+    });
+
+    // ---- Not on the APL at all. ----
+    // Still the model's call, and legitimately so: it is reporting products
+    // nothing in our data knows about. No supplier behind them to bill.
     const list = menu.off_apl_brands || menu.off_apl || [];
     if (!Array.isArray(list)) return;
 
-    const venue = menu.venue || '';
-    const scoped = scopeFor(venue);
-
     list.forEach((entry) => {
-      const name = (
-        typeof entry === 'string' ? entry : entry?.name || ''
-      ).trim();
+      const name = (typeof entry === 'string' ? entry : entry?.name || '').trim();
       if (!name) return;
+      // A rewording of something already counted on this menu is not a find.
+      if (matchesAplBrand(name, allBrands)) return;
 
-      // Already counted on this menu — the model reports a brand it does not
-      // recognise, and a rewording of something in scope is not a finding.
-      if (matchesAplBrand(name, scoped)) return;
-
-      const key = name.toLowerCase();
+      const rec = bucket(name, { status: 'off-apl' });
       const category =
         typeof entry === 'object' && entry?.category ? entry.category : '';
-      const hits =
-        typeof entry === 'object' && Array.isArray(entry?.where)
-          ? entry.where.length || 1
-          : 1;
-
-      if (!map[key]) {
-        // Two different findings share this bucket, and the client needs a
-        // different answer to each:
-        //
-        //   not-approved — on the APL, but with no mark in the column for the
-        //                  outlet this menu belongs to. Earns no impression,
-        //                  and is worth raising: the outlet is listing
-        //                  something it is not cleared to pour.
-        //   off-apl      — not on the APL anywhere. No supplier relationship
-        //                  behind it, so nothing to bill and nothing to
-        //                  enforce. Usually a local brand left off on purpose.
-        const onFullApl = venue ? matchesAplBrand(name, allBrands) : null;
-        map[key] = {
-          name,
-          category,
-          locations: {},
-          total: 0,
-          status: onFullApl ? 'not-approved' : 'off-apl',
-          ...(onFullApl
-            ? {
-                aplName: onFullApl.name,
-                supplier: onFullApl.supplier,
-                approvedAt: onFullApl.venues || [],
-                flaggedAt: new Set(),
-              }
-            : {}),
-        };
-      }
-
-      const rec = map[key];
-      rec.total += hits;
-      rec.locations[menu.location] = (rec.locations[menu.location] || 0) + hits;
       if (!rec.category && category) rec.category = category;
-      if (rec.flaggedAt && venue) rec.flaggedAt.add(venue);
+      const where =
+        typeof entry === 'object' && Array.isArray(entry?.where) ? entry.where : [];
+      record(rec, menu, where, where.length || 1);
     });
   });
 
   return Object.values(map)
-    .map((r) =>
-      r.flaggedAt ? { ...r, flaggedAt: [...r.flaggedAt] } : r
-    )
+    .map((r) => ({
+      ...r,
+      flaggedAt: r.flaggedAt ? [...r.flaggedAt] : undefined,
+      contexts: Object.fromEntries(
+        Object.entries(r.contexts).map(([loc, set]) => [loc, [...set]])
+      ),
+    }))
     .sort(
       (a, b) =>
         (a.status === b.status ? 0 : a.status === 'not-approved' ? -1 : 1) ||
@@ -4497,6 +4734,11 @@ ${Object.keys(listingByLocation)
       // ours. If a note shaped these numbers, the person being invoiced
       // should be able to see it.
       const notesUsed = results.menuAnalyses.filter((m) => (m.note || '').trim());
+      const includedFooter =
+        results.includedNames && results.includedNames.length
+          ? `\nIncluded by hand after review: ${results.includedNames.join(', ')}`
+          : '';
+
       const noteFooter = notesUsed.length
         ? `\nNotes applied when reading these menus:\n${notesUsed
             .map((m) => `  ${m.filename}: ${m.note}`)
@@ -4553,7 +4795,7 @@ The Ignite Team
 Generated by Fire Watch - Ignite Creative Services LLC - ${stamp}
 Every appearance of an APL brand counts as one impression: recipe ingredients,
 printed product lists, cocktail names, and brands visible in menu photography
-are each counted separately.${noteFooter}`;
+are each counted separately.${includedFooter}${noteFooter}`;
 
       return {
         location: supplier, // the review UI keys on this field
