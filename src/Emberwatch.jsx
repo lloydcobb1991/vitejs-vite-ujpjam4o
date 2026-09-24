@@ -600,16 +600,22 @@ below.
         // @ Cambria Mesa before trusting it. Pass condition: Coke, Diet Coke,
         // Sprite, Root Beer and Lemonade appear on all three runs.
         model: 'claude-sonnet-5',
-        // No temperature was ever set here, so every run used the API default
-        // of 1.0 — the model sampled a different answer each time. Two runs of
-        // the Acacia bar book with identical inputs agreed on only 86% of
-        // brands: one merged Michelob ULTRA Zero into Michelob ULTRA, one
-        // missed Benvolio Prosecco and Q Ginger Beer, and they disagreed on
-        // four counts. Zero makes it take the most likely reading every time.
         //
-        // Not a guarantee of identical output — nothing about an LLM is — but
-        // it removes deliberate randomness from a number that gets invoiced.
-        temperature: 0,
+        // NO TEMPERATURE HERE ON PURPOSE. Do not add one back.
+        //
+        // History: on claude-sonnet-4-6 no temperature was set, so every run
+        // used the API default of 1.0 and the model sampled a different answer
+        // each time. Two runs of the Acacia bar book with identical inputs
+        // agreed on only 86% of brands: one merged Michelob ULTRA Zero into
+        // Michelob ULTRA, one missed Benvolio Prosecco and Q Ginger Beer, and
+        // they disagreed on four counts. Setting temperature: 0 pushed that to
+        // 90-96%.
+        //
+        // claude-sonnet-5 rejects the parameter outright: sending it returns
+        // "400 — `temperature` is deprecated for this model" and every menu in
+        // the batch fails. The knob is gone at the model level, so consistency
+        // now has to come from the prompt and from the second-pass checklist,
+        // not from a sampling setting.
         max_tokens: 16000,
         messages: [
           {
