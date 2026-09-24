@@ -376,8 +376,26 @@ export default function Emberwatch() {
           // lists it appeared in, so the report can say where it was seen.
           const approvedImpressions = {};
           const notApproved = [];
+          const stray = [];
           Object.entries(rawAnalysis.brand_impressions || {}).forEach(
             ([reported, data]) => {
+              // Does this correspond to a real row on the APL at all? The
+              // Acacia bar book lists "High West Bourbon"; the APL carries
+              // High West Double Rye and Rendezvous Rye and nothing else.
+              // The model counted it anyway and attributed it to Constellation
+              // — two impressions invoiced for a product the APL does not
+              // have. An impression has to point at a row, so anything that
+              // does not is moved to the not-counted list where a person sees
+              // it, rather than billed.
+              const onFullApl = matchesAplBrand(reported, activeApl.brands);
+              if (!onFullApl) {
+                stray.push({
+                  name: reported,
+                  category: '',
+                  where: Array.isArray(data.cocktails) ? data.cocktails : [],
+                });
+                return;
+              }
               if (!fileVenue) {
                 approvedImpressions[reported] = data;
                 return;
@@ -387,7 +405,6 @@ export default function Emberwatch() {
                 approvedImpressions[reported] = data;
                 return;
               }
-              const onFullApl = matchesAplBrand(reported, activeApl.brands);
               notApproved.push({
                 name: canonicalizeBrand(reported, activeApl.brands),
                 category: onFullApl?.category || '',
@@ -404,6 +421,10 @@ export default function Emberwatch() {
             ...rawAnalysis,
             brand_impressions: approvedImpressions,
             not_approved: notApproved,
+            off_apl_brands: [
+              ...(rawAnalysis.off_apl_brands || rawAnalysis.off_apl || []),
+              ...stray,
+            ],
           };
 
           menuAnalyses.push({
@@ -2195,14 +2216,14 @@ function defaultLabelFromFilename(filename) {
 }
 
 function filterIssues(issues, activeApl) {
-  const aplNames = new Set(
-    (activeApl?.brands || []).map((b) =>
-      String(b.name || '').trim().toLowerCase()
-    )
-  );
+  // Does the correction name a real APL product? Compared with the same
+  // matcher everything else uses, not by exact string: the APL writes
+  // "BACARDÍ Superior (Puerto Rico)", so a correction naming "BACARDÍ
+  // Superior" failed a literal comparison and the note — a genuine
+  // misspelling on the menu — was thrown away without trace.
+  const brands = activeApl?.brands || [];
   const isRealAplBrand = (name) =>
-    aplNames.size === 0 ||
-    aplNames.has(String(name || '').trim().toLowerCase());
+    brands.length === 0 || !!matchesAplBrand(name, brands);
 
   // Collapse repeats. The model reports the same misspelling once per place
   // it occurs, so "Budlight - should read Bud Light" arrived twice on a menu
@@ -2225,11 +2246,24 @@ function filterIssues(issues, activeApl) {
     //
     // Exact token comparison, not fuzzy: "Bacardy" vs "Bacardi" must still
     // come through as a real misspelling.
+    // If every word of the APL name appears in the menu's wording, in order,
+    // the menu is simply saying MORE — "Sun Cruiser Classic Iced Tea" for
+    // "Sun Cruiser Iced Tea". That is not a naming fault and telling a client
+    // to delete the extra word is noise. Checked as a subsequence, not a
+    // prefix: the extra word usually lands in the middle, which is why
+    // "Classic" slipped through and got flagged.
     const foundTokens = offAplTokens(found);
     const correctTokens = offAplTokens(correct);
+    if (correctTokens.length && foundTokens.length > correctTokens.length) {
+      let k = 0;
+      for (const f of foundTokens) {
+        if (k < correctTokens.length && f === correctTokens[k]) k++;
+      }
+      if (k === correctTokens.length) return false;
+    }
     if (
       correctTokens.length &&
-      foundTokens.length >= correctTokens.length &&
+      foundTokens.length === correctTokens.length &&
       correctTokens.every((t, idx) => t === foundTokens[idx])
     ) {
       return false;
