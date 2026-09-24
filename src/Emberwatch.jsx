@@ -1227,7 +1227,7 @@ ONLY respond with JSON — no commentary before or after it. Include the "cockta
             menu.filename,
             display,
             category,
-            context,
+            surface === 'Product list' ? tidyListLabel(context, category) : context,
             surface,
             1,
           ]);
@@ -4483,6 +4483,39 @@ function extractFirstJsonObject(s) {
 // counted as impressions and NEVER emailed to suppliers — this list exists
 // purely as a manual-review aid ("what else is this venue carrying?").
 // ---------------------------------------------------------------------------
+
+// Which drink family an APL category belongs to. Used only to sanity-check
+// the model's own labelling of a product list.
+function categoryFamily(category) {
+  const c = String(category || '').toLowerCase();
+  if (!c) return '';
+  if (/domestic|craft|import|lager|ale|ipa|pilsner|stout|porter|cider|seltzer|hard (iced tea|lemonade)/.test(c))
+    return 'beer';
+  if (/chardonnay|cabernet|sauvignon|pinot|merlot|malbec|zinfandel|syrah|shiraz|riesling|moscato|rose|rosé|prosecco|champagne|blend|grigio|gris|brut|sparkling/.test(c))
+    return 'wine';
+  if (/vodka|rum|gin|tequila|mezcal|whisk|bourbon|scotch|brandy|cognac|cordial|liqueur|vermouth|bitters/.test(c))
+    return 'spirit';
+  return '';
+}
+
+// The model names the list it found a product on, and that name is not
+// reliable. Two runs of the same Acacia bar book labelled the same rows
+// "Beers List" and "Wine List" one time and "Spirits List" the next. Saying a
+// Bud Light appeared on the spirits list is visibly wrong on a client email,
+// so a label that contradicts the product's own APL category is replaced with
+// a neutral one. A label that agrees, or says something the category cannot
+// contradict ("Draft", "Bottles/Cans"), is left alone.
+function tidyListLabel(context, category) {
+  const fam = categoryFamily(category);
+  if (!fam) return context;
+  const c = String(context || '').toLowerCase();
+  const claims =
+    /spirit|liquor/.test(c) ? 'spirit' :
+    /wine/.test(c) ? 'wine' :
+    /beer/.test(c) ? 'beer' : '';
+  if (!claims || claims === fam) return context;
+  return 'Product list';
+}
 
 // Strip the surface tag the model appends — "Negroni (image text)" — so a
 // drink is named once however many surfaces it appeared on.
