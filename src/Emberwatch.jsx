@@ -594,7 +594,22 @@ below.
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
+        // Moved up from claude-sonnet-4-6 (two generations back). The prompt was
+        // tuned against 4-6's behaviour over several rounds, so this is not a
+        // guaranteed drop-in — re-run the three-run repeatability test on Acacia
+        // @ Cambria Mesa before trusting it. Pass condition: Coke, Diet Coke,
+        // Sprite, Root Beer and Lemonade appear on all three runs.
+        model: 'claude-sonnet-5',
+        // No temperature was ever set here, so every run used the API default
+        // of 1.0 — the model sampled a different answer each time. Two runs of
+        // the Acacia bar book with identical inputs agreed on only 86% of
+        // brands: one merged Michelob ULTRA Zero into Michelob ULTRA, one
+        // missed Benvolio Prosecco and Q Ginger Beer, and they disagreed on
+        // four counts. Zero makes it take the most likely reading every time.
+        //
+        // Not a guarantee of identical output — nothing about an LLM is — but
+        // it removes deliberate randomness from a number that gets invoiced.
+        temperature: 0,
         max_tokens: 16000,
         messages: [
           {
