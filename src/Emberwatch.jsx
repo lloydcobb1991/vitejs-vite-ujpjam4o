@@ -958,8 +958,19 @@ ONLY respond with JSON — no commentary before or after it. Include the "cockta
     // variations — "Sprits list", "Spirits Menu", "(img)". Matching the exact
     // string sent those rows to the default bucket, which mislabels a product
     // listing as a recipe ingredient. Match loosely instead.
+    //
+    // Plurals matter more than they look: "Wines List" and "Beers List" both
+    // failed, because \b sat between "wine" and the "s" that followed. Every
+    // wine and beer on the OHM bar books was therefore reported to suppliers
+    // as a cocktail placement rather than a product listing.
+    //
+    // Anchored at both ends on purpose. Matching only the START would catch a
+    // drink whose NAME opens with one of these words — a "Beer Nuts Old
+    // Fashioned" is a cocktail, not a product list. The whole tag has to be a
+    // list label, give or take a trailing parenthetical like
+    // "Spirits List (Premium Full Bar)".
     const PRODUCT_LIST_RE =
-      /^\s*(sp[ir]{1,3}ts?|spirit|liquor|wine|beer|bottle|draft|drink|product|mixer|well)\s*(list|menu|selection|offerings)?\b/i;
+      /^\s*(sp[ir]{1,3}ts?|spirits?|liquors?|wines?|beers?|bottles?|drafts?|drinks?|products?|mixers?|wells?|cocktails?|seltzers?|soft\s+drinks?|by\s+the\s+(glass|bottle))\s*(list|lists|menu|menus|selection|selections|offerings)?\s*(\([^)]*\))?\s*$/i;
 
     const surfaceForTag = (tag) => {
       const t = String(tag || '').toLowerCase().replace(/[^a-z ]/g, '').trim();
@@ -1037,6 +1048,12 @@ ONLY respond with JSON — no commentary before or after it. Include the "cockta
         const display = normalizeBrandDisplay(canonical);
         const category = lookupCategory(canonical);
         const contexts = Array.isArray(data.cocktails) ? data.cocktails : [];
+
+        // A zero-count brand is the model saying "I considered this and it
+        // does not belong" — High West Double Rye came back that way against
+        // a menu listing High West Bourbon. Recording it as a row reads like
+        // a placement that earned nothing.
+        if (!(data.count > 0)) return;
 
         if (contexts.length === 0) {
           // No context returned — still record the count so the detail rows
@@ -4388,7 +4405,7 @@ function buildSupplierEmails(results, activeApl, program = PROGRAM_DEFAULTS) {
       contexts.forEach((raw) => {
         const t = String(raw || '').trim();
         if (!t) return;
-        if (/^\s*(sp[ir]{1,3}ts?|spirit|liquor|wine|beer|bottle|draft|drink|product|mixer|well)\s*(list|menu|selection|offerings)?\b/i.test(t)) {
+        if (/^\s*(sp[ir]{1,3}ts?|spirits?|liquors?|wines?|beers?|bottles?|drafts?|drinks?|products?|mixers?|wells?|cocktails?|seltzers?|soft\s+drinks?|by\s+the\s+(glass|bottle))\s*(list|lists|menu|menus|selection|selections|offerings)?\s*(\([^)]*\))?\s*$/i.test(t)) {
           loc.listings += 1;
           return;
         }
