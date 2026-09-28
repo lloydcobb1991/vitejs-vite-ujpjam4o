@@ -1208,8 +1208,28 @@ ONLY respond with JSON — no commentary before or after it. Include the "cockta
     // Fashioned" is a cocktail, not a product list. The whole tag has to be a
     // list label, give or take a trailing parenthetical like
     // "Spirits List (Premium Full Bar)".
+    // Known list names, matched from the front. This catches the common ones
+    // ("Spirits List", "Wine List") including a bare "Spirits" with no noun.
     const PRODUCT_LIST_RE =
       /^\s*(sp[ir]{1,3}ts?|spirits?|liquors?|wines?|beers?|bottles?|drafts?|drinks?|products?|mixers?|wells?|cocktails?|seltzers?|soft\s+drinks?|by\s+the\s+(glass|bottle))\s*(list|lists|menu|menus|selection|selections|offerings)?\s*(\([^)]*\))?\s*$/i;
+
+    // The front-anchored list above is too strict on its own, because the model
+    // invents its own section names and only the LAST word is predictable. On
+    // the Acacia bar book it produced "Bottles/Cans List" and "Zero Proof Beer
+    // List": neither starts with a word in the list above (the slash breaks
+    // "Bottles", and "Zero Proof" precedes "Beer"), so twelve beer rows were
+    // classed as Recipe and reported as though Bud Light appeared in a cocktail
+    // called "Bottles/Cans List". It also skipped the label sanity-check below,
+    // which only runs on product lists.
+    //
+    // So also accept anything ENDING in a list noun. A cocktail is named after a
+    // drink, not after the word "List", so the false-positive risk is nil while
+    // this covers every section name the model can invent.
+    const PRODUCT_LIST_TAIL_RE =
+      /(^|[\s/&-])(list|lists|menu|menus|selection|selections|offerings)\s*(\([^)]*\))?\s*$/i;
+
+    const isProductListLabel = (s) =>
+      PRODUCT_LIST_RE.test(s) || PRODUCT_LIST_TAIL_RE.test(s);
 
     const surfaceForTag = (tag) => {
       const t = String(tag || '').toLowerCase().replace(/[^a-z ]/g, '').trim();
@@ -1226,7 +1246,7 @@ ONLY respond with JSON — no commentary before or after it. Include the "cockta
       const s = String(raw || '').trim();
       if (!s) return { context: '', surface: 'Recipe' };
 
-      if (PRODUCT_LIST_RE.test(s)) {
+      if (isProductListLabel(s)) {
         // "Spirits List (Premium Full Bar)" keeps the bar name as context.
         const m = s.match(/^[^(]*\((.+)\)\s*$/);
         return { context: m ? m[1].trim() : s, surface: 'Product list' };
@@ -1359,9 +1379,15 @@ ONLY respond with JSON — no commentary before or after it. Include the "cockta
           [],
           ['OUTLET EACH MENU WAS SCORED FOR'],
           ['Menu file', 'Outlet', 'Brands in scope'],
+          // Raw values, NOT pre-escaped. The serializer at the bottom of this
+          // function runs csvCell over every cell of every row, and csvCell is
+          // not safe to apply twice: a value holding a comma comes back wrapped
+          // in quotes, the second pass sees those quotes and wraps it again, and
+          // the cell arrives in Excel with visible "" marks around it. Escaping
+          // belongs at serialization, once, and nowhere else.
           ...view.menuAnalyses.map((m) => [
-            csvCell(m.filename),
-            csvCell(m.venue || 'All outlets — whole APL'),
+            m.filename,
+            m.venue || 'All outlets — whole APL',
             m.scopeSize ?? '',
           ]),
         ]
@@ -1372,7 +1398,9 @@ ONLY respond with JSON — no commentary before or after it. Include the "cockta
           [],
           ['OPERATOR NOTES APPLIED TO THIS RUN'],
           ['Menu file', 'Note given to the analysis'],
-          ...noted.map((m) => [csvCell(m.filename), csvCell(m.note)]),
+          // Operator notes are free text and routinely contain commas, so this
+          // is where the double-escaping actually showed up in the file.
+          ...noted.map((m) => [m.filename, m.note]),
         ]
       : [];
 
@@ -1383,14 +1411,103 @@ ONLY respond with JSON — no commentary before or after it. Include the "cockta
             [],
             ['COUNTED BY HAND (not approved at the outlet, included anyway)'],
             ['Brand'],
-            ...view.includedNames.map((n) => [csvCell(n)]),
+            ...view.includedNames.map((n) => [n]),
           ]
         : [];
+
+    // ---------------------------------------------------------------------
+    // Compliance findings. These used to live ONLY on the results screen and
+    // in the summary export, which made the detail file quietly misleading:
+    // it is the file that gets opened when someone asks "did it catch X?", and
+    // a product the tool deliberately refused to count looked identical to a
+    // product it never saw. Two real examples from the Acacia bar book, both
+    // read as bot misses and were neither:
+    //
+    //   "High West Bourbon"  — the APL carries High West Double Rye and High
+    //                          West Rendezvous Rye. There is no High West
+    //                          Bourbon, so nothing was counted. That is a menu
+    //                          error worth money: Rendezvous IS approved at
+    //                          Cambria Mesa, so the wording is costing
+    //                          Constellation an impression it is entitled to.
+    //   "Hiyo Social Tonic"  — genuinely absent from the APL. Correctly not
+    //                          counted, and worth telling the client about.
+    //
+    // Both were found and both were invisible here. Now they travel with the
+    // numbers, in the same file, clearly fenced off from the billable rows.
+    // ---------------------------------------------------------------------
+    const notCountedRows =
+      view.offApl && view.offApl.length > 0
+        ? [
+            [],
+            [
+              'COMPLIANCE — FOUND ON THE MENU BUT NOT COUNTED (not billed, not emailed to suppliers)',
+            ],
+            [
+              'Brand as printed',
+              'Category',
+              'Why it was not counted',
+              'Outlets seen',
+              'Where on the menu',
+              'Mentions',
+            ],
+            ...view.offApl.map((b) => [
+              b.name,
+              b.category || '',
+              b.status === 'not-approved'
+                ? `On the APL as "${b.aplName}" (${b.supplier}) but not approved at ${
+                    (b.flaggedAt || []).join(', ') || 'this outlet'
+                  }`
+                : 'Not on the APL',
+              Object.entries(b.locations || {})
+                .map(([loc, c]) => `${loc} (${c})`)
+                .join('; '),
+              Object.entries(b.contexts || {})
+                .map(([loc, list]) =>
+                  list.length ? `${loc}: ${list.join('; ')}` : ''
+                )
+                .filter(Boolean)
+                .join(' | '),
+              b.total,
+            ]),
+          ]
+        : [];
+
+    // Naming and spelling faults. Same filter the supplier emails use, so what
+    // is in this file is what the client is being told.
+    const namingRows = (() => {
+      const found = [];
+      view.menuAnalyses.forEach((menu) => {
+        filterIssues(menu.compliance_issues, activeApl).forEach((i) => {
+          found.push([
+            menu.filename,
+            i.found_text || '',
+            i.correct_name || '',
+            cleanIssueContext(i.cocktail) || '',
+          ]);
+        });
+      });
+      return found.length
+        ? [
+            [],
+            ['COMPLIANCE — NAMING AND SPELLING ON THE MENU'],
+            ['Menu file', 'Printed as', 'Should read', 'Where'],
+            ...found,
+          ]
+        : [];
+    })();
+
+    const cleanBill =
+      (!view.offApl || view.offApl.length === 0) && namingRows.length === 0;
 
     const footer = [
       ...venueRows,
       ...includedRows,
       ...noteRows,
+      ...notCountedRows,
+      ...namingRows,
+      ...(cleanBill
+        ? [[], ['COMPLIANCE — nothing flagged on this run.']]
+        : []),
       [],
       [
         reconciled
@@ -4586,6 +4703,16 @@ function categoryFamily(category) {
     return 'wine';
   if (/vodka|rum|gin|tequila|mezcal|whisk|bourbon|scotch|brandy|cognac|cordial|liqueur|vermouth|bitters/.test(c))
     return 'spirit';
+  // Non-alcoholic. This arm did not exist, and its absence was a hole rather
+  // than a gap: an unrecognised category returned '' and tidyListLabel below
+  // bails out on '', so EVERY soft drink, juice, coffee and syrup was exempt
+  // from the sanity-check. One Acacia run labelled Coke, Diet Coke, Sprite,
+  // Root Beer, Lemonade, COFFEE, HOT TEA, Cranberry and Orange as appearing on
+  // the "Spirits List" and the guard passed all nine through untouched.
+  //
+  // Checked last so the beer arm keeps "Hard Lemonade" and "Hard Iced Tea".
+  if (/soda|cola|soft drink|juice|sour|coffee|tea|water|syrup|pur[eé]e|mixer|lemonade|energy/.test(c))
+    return 'nonalc';
   return '';
 }
 
@@ -4600,11 +4727,21 @@ function tidyListLabel(context, category) {
   const fam = categoryFamily(category);
   if (!fam) return context;
   const c = String(context || '').toLowerCase();
+  // What family does the label itself claim? Checked most-specific first:
+  // "Zero Proof Beer" and "Soft Drinks" both contain words the looser tests
+  // would grab, so the non-alcoholic test runs before the beer/wine/spirit ones.
   const claims =
+    /soft\s*drink|soda|juice|coffee|tea|water|n\/?a\b|zero\s*proof|non-?alc/.test(c) ? 'nonalc' :
     /spirit|liquor/.test(c) ? 'spirit' :
     /wine/.test(c) ? 'wine' :
-    /beer/.test(c) ? 'beer' : '';
+    /beer|draft|draught|bottles?\s*\/?\s*cans?|seltzer/.test(c) ? 'beer' : '';
   if (!claims || claims === fam) return context;
+
+  // A zero-proof beer is shelved with the beer but is a real product list for a
+  // beer-family product, so don't punish the one overlap that is legitimate.
+  if (fam === 'beer' && claims === 'nonalc' && /zero\s*proof|non-?alc/.test(c))
+    return context;
+
   return 'Product list';
 }
 
