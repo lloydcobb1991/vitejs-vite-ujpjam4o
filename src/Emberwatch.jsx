@@ -588,7 +588,11 @@ below.
 `
       : '';
 
-    const response = await fetch(`${API_BASE}/api/analyze`, {
+    // One attempt at the model, at a given budget and reasoning effort. Built
+    // as a function because a long menu can need more than one attempt — see
+    // the ladder below the prompt.
+    const callClaude = ({ maxTokens, effort }) =>
+      fetch(`${API_BASE}/api/analyze`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -624,23 +628,14 @@ below.
         // blocks=[thinking(44600b)], in=19706 out=16000. The run looked like a
         // parser bug and was actually a budget problem.
         //
-        // 32000 leaves room for a long reasoning pass AND a full report. The
-        // biggest reports we produce run well under 16000 on their own, so the
-        // answer half has roughly the whole old budget to itself.
-        max_tokens: 32000,
-
-        // How hard it reasons before answering. 'medium' is a deliberate middle:
-        // the failure we are chasing is missed sections of printed product
-        // lists, which is an attention problem that reasoning genuinely helps,
-        // so throttling to 'low' would work against us. But effort spends the
-        // same budget the report needs, so 'high'/'xhigh'/'max' raise the risk
-        // of the exact truncation above on a long bar book.
-        //
-        // If runs come back truncated again, LOWER this before raising
-        // max_tokens further — the diagnostic below will say which it was.
-        output_config: {
-          effort: 'medium',
-        },
+        // Raising the budget to 32000 did NOT fix it — a 22169-token menu spent
+        // all 32000 thinking too (blocks=[thinking(84432b)]). Budget alone is
+        // the wrong lever: reasoning expands to fill whatever it is given, so
+        // every raise buys a bigger bill and the same failure. Effort is the
+        // lever that actually bounds it, which is why both are passed in here
+        // rather than hard-coded, and why the ladder below lowers effort first.
+        max_tokens: maxTokens,
+        output_config: { effort },
         messages: [
           {
             role: 'user',
@@ -849,6 +844,61 @@ ONLY respond with JSON — no commentary before or after it. Include the "cockta
       }),
     });
 
+    // -----------------------------------------------------------------------
+    // Attempt ladder.
+    //
+    // A menu that needs more reasoning than the budget allows produces a 200
+    // with nothing in it: the model thinks until the budget is gone and never
+    // writes the report. That failed the menu, and with a batch running it
+    // failed every menu, which is what "menu after menu" looked like.
+    //
+    // Retrying identically would fail identically, so each rung changes
+    // something. Effort comes down BEFORE the budget goes up, because budget
+    // was tried twice (16000, then 32000) and reasoning simply expanded to fill
+    // both. The last rung is the one that cannot think itself out of room.
+    //
+    // Cost note: a truncated attempt still bills for every token it burned, so
+    // a menu that needs rung 3 costs roughly all three. That is the price of
+    // finishing the batch instead of failing it, and it is worth watching if
+    // most menus start needing the lower rungs.
+    // -----------------------------------------------------------------------
+    const ATTEMPTS = [
+      { maxTokens: 32000, effort: 'low' },
+      { maxTokens: 48000, effort: 'low' },
+    ];
+
+    let response;
+    let lastTruncation = '';
+
+    for (let attempt = 0; attempt < ATTEMPTS.length; attempt++) {
+      const rung = ATTEMPTS[attempt];
+      response = await callClaude(rung);
+
+      const outcome = await readAttempt(response, rung, attempt);
+      if (outcome.ok) return outcome.value;
+      lastTruncation = outcome.why;
+      // Loop round to the next rung. Falls out of the loop if this was the last.
+    }
+
+    throw new Error(
+      `Menu too long to analyse — the model ran out of room to think on all ` +
+        `${ATTEMPTS.length} attempts, so no count was produced. ${lastTruncation} ` +
+        `Split the PDF and run it in parts, or raise the last rung of ATTEMPTS ` +
+        `in Emberwatch.jsx.`
+    );
+  };
+
+  // Read one attempt. Returns {ok:true, value} on a usable report, or
+  // {ok:false, why} when the model ran out of room and it is worth trying the
+  // next rung. Anything genuinely broken throws, because retrying a rejected
+  // API key or a malformed PDF just wastes money.
+  // Declared with `function`, not `const`, on purpose. It is CALLED from
+  // analyzeMenuWithClaude above, which sits earlier in this component body. A
+  // const arrow would be in the temporal dead zone at that point if the call
+  // ever happened during render, and that exact mistake has crashed this file
+  // twice — a build that passes and a white page in the browser. A function
+  // declaration hoists, so the ordering cannot matter.
+  async function readAttempt(response, rung, attempt) {
     if (!response.ok) {
       // Surface WHY it failed, not just the status. The body is where Anthropic
       // (or the Railway proxy) explains itself: page limits, size limits,
@@ -934,10 +984,26 @@ ONLY respond with JSON — no commentary before or after it. Include the "cockta
       const usage = data.usage
         ? ` in=${data.usage.input_tokens} out=${data.usage.output_tokens}`
         : '';
-      throw new Error(
-        `Model returned no text. stop_reason=${data.stop_reason || 'none'}; ` +
-          `blocks=[${shape}];${usage} model=${data.model || 'unknown'}`
-      );
+      const detail =
+        `stop_reason=${data.stop_reason || 'none'}; blocks=[${shape}];` +
+        `${usage} model=${data.model || 'unknown'}`;
+
+      // Out of room to think: retryable, and the next rung changes the terms.
+      if (data.stop_reason === 'max_tokens') {
+        console.warn(
+          `Attempt ${attempt + 1} (max_tokens=${rung.maxTokens}, effort=${
+            rung.effort
+          }) used its whole budget thinking. ${detail}`
+        );
+        return {
+          ok: false,
+          why: `Last attempt: ${detail}.`,
+        };
+      }
+
+      // Anything else that produced no text is not a budget problem, so
+      // spending money on another identical attempt is pointless.
+      throw new Error(`Model returned no text. ${detail}`);
     }
 
     // Truncation with SOME text is the nastier cousin of the case above: the
@@ -947,20 +1013,24 @@ ONLY respond with JSON — no commentary before or after it. Include the "cockta
     // must never be treated as a complete count — the missing tail would look
     // exactly like products that aren't on the menu.
     if (data.stop_reason === 'max_tokens') {
-      throw new Error(
-        `Report was cut off — hit the ${
-          data.usage ? data.usage.output_tokens : 'max'
-        }-token output limit mid-answer, so the count is incomplete. ` +
-          `Raise max_tokens or lower output_config.effort in Emberwatch.jsx.`
+      const out = data.usage ? data.usage.output_tokens : rung.maxTokens;
+      console.warn(
+        `Attempt ${attempt + 1} (max_tokens=${rung.maxTokens}, effort=${
+          rung.effort
+        }) was cut off mid-report at ${out} tokens.`
       );
+      return {
+        ok: false,
+        why: `Last attempt was cut off mid-report at ${out} tokens.`,
+      };
     }
 
     // Robust parse. The old code did a single JSON.parse on the whole string,
     // which throws "unexpected non-whitespace character after JSON data" the
     // moment the model appends ANY trailing text (a note, a second block, a
     // stray sentence) after the JSON. parseClaudeJson tolerates that.
-    return parseClaudeJson(text);
-  };
+    return { ok: true, value: parseClaudeJson(text) };
+  }
 
   // Fold any hand-approved products back into the counted side and redo the
   // totals. Kept as a derivation rather than an edit to `results`, so the
