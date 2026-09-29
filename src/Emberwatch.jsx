@@ -901,7 +901,7 @@ ONLY respond with JSON — no commentary before or after it. Include the "cockta
   async function readAttempt(response, rung, attempt) {
     if (!response.ok) {
       // Surface WHY it failed, not just the status. The body is where Anthropic
-      // (or the Railway proxy) explains itself: page limits, size limits,
+      // (or the Vercel proxy) explains itself: page limits, size limits,
       // "prompt is too long", body-parser rejections, etc. Without this we were
       // throwing away the only useful diagnostic.
       let detail = '';
@@ -924,6 +924,30 @@ ONLY respond with JSON — no commentary before or after it. Include the "cockta
         .replace(/\s+/g, ' ')
         .trim()
         .slice(0, 300);
+      // The proxy runs as a Vercel function with no maxDuration set, so it gets
+      // the project default of 300 seconds. Sonnet 5 reasons before it answers,
+      // and a long bar book at a high token budget can run for minutes. When it
+      // overruns, Vercel kills the function and returns a gateway error whose
+      // body is an HTML page — so `detail` becomes "<!DOCTYPE html>..." and the
+      // message reads like a broken endpoint instead of a slow menu.
+      //
+      // Named here so nobody spends an afternoon on it. Deliberately NOT thrown
+      // as ACCOUNT: the next menu may well be shorter and succeed, so the batch
+      // should carry on rather than abort.
+      if (
+        response.status === 504 ||
+        response.status === 502 ||
+        response.status === 524 ||
+        /FUNCTION_INVOCATION_TIMEOUT|gateway ?time-?out/i.test(detail)
+      ) {
+        throw new Error(
+          `Timed out (${response.status}) — the proxy was killed before Claude ` +
+            `finished. This menu is long enough that the analysis outran the ` +
+            `function's time limit. Raise maxDuration for api/analyze.js in ` +
+            `vercel.json, or split this PDF and run it in parts.`
+        );
+      }
+
       // Classify account-level failures separately. These fail EVERY
       // remaining menu identically, so the batch loop aborts on them rather
       // than grinding through 39 more calls and reporting 40 vague errors.
@@ -932,7 +956,7 @@ ONLY respond with JSON — no commentary before or after it. Include the "cockta
         /authentication|invalid x-api-key/i.test(detail)
       ) {
         throw new Error(
-          'ACCOUNT: API key rejected (401). Check ANTHROPIC_API_KEY on Railway.'
+          'ACCOUNT: API key rejected (401). Check ANTHROPIC_API_KEY in Vercel.'
         );
       }
       if (
