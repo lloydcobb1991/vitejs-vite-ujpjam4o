@@ -154,7 +154,7 @@ export default function Dashboard({ onSelectTool }) {
             animation: 'fadeInUp 0.5s ease-out 0.3s both',
           }}
         >
-          <p style={{ margin: 0 }}>Build (Prod) V1.1</p>
+          <p style={{ margin: 0 }}>Build (Prod) V1.2</p>
         </div>
       </div>
     </div>
